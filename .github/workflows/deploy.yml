@@ -19,10 +19,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Install Dependencies
-        run: npm install
+          
+      - name: Clean and Install Dependencies
+        # 👇 就是这里！强制机器人删掉你传上来的旧文件，重新安装一遍！
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+          
       - name: Build Project
         run: npm run build
+        
       - name: Upload Artifact
         uses: actions/upload-pages-artifact@v3
         with:
