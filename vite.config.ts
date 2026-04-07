@@ -1,8 +1,20 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import path from "path";
+import { fileURLToPath } from "url";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+import { viteSingleFile } from "vite-plugin-singlefile";
 
-// https://vitejs.dev/config/
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// https://vite.dev/config/
 export default defineConfig({
-  base: '/pet/',   // 👉 新手注意：添加这行！前后都有斜杠，名字必须和仓库名一模一样！
-  plugins: [react()],
-})
+  plugins: [react(), tailwindcss(), viteSingleFile()],
+  base: '/pet/',  
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "src"),
+    },
+  },
+});
