@@ -1,0 +1,35 @@
+git init -b main
+git add .
+git commit -m "first commit"
+git remote add origin wpuuu
+git push -u origin main
+
+
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  base: '/pet/',
+})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
