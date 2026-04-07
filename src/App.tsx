@@ -7,6 +7,7 @@ type Emotion = "生气" | "委屈" | "难过" | "不服气" | "担心" | "平静
 type AgeGroup = "3_5" | "6_8" | "9_12" | "13_15";
 type Source = "gemini" | "demo" | "safety";
 type ChildGender = "boy" | "girl" | "unspecified";
+type TtsRole = "sweet" | "playful" | "gentle" | "story";
 
 type SettingsState = {
   petName: string;
@@ -19,6 +20,7 @@ type SettingsState = {
   commonCaregiverOptions: string[];
   apiKey: string;
   systemPrompt: string;
+  ttsRole: TtsRole;
 };
 
 type DraftState = {
@@ -239,6 +241,33 @@ const AGE_META: Record<AgeGroup, AgeMeta> = {
 
 const EMOTION_OPTIONS: Emotion[] = ["生气", "委屈", "难过", "不服气", "担心", "平静"];
 
+const TTS_ROLE_META: Record<TtsRole, { label: string; rate: number; pitch: number; preferredNamePattern?: RegExp }> = {
+  sweet: {
+    label: "软萌小奶音",
+    rate: 0.96,
+    pitch: 1.24,
+    preferredNamePattern: /xiaoxiao|xiaoyi|female|girl|女/i,
+  },
+  playful: {
+    label: "元气小可爱",
+    rate: 1.02,
+    pitch: 1.18,
+    preferredNamePattern: /xiaoxiao|xiaoyi|yunxi|female|girl|女/i,
+  },
+  gentle: {
+    label: "温柔陪伴音",
+    rate: 0.92,
+    pitch: 1.08,
+    preferredNamePattern: /xiaoyi|xiaoxiao|female|girl|女/i,
+  },
+  story: {
+    label: "童话讲述音",
+    rate: 0.9,
+    pitch: 1.14,
+    preferredNamePattern: /xiaoxiao|story|female|girl|女/i,
+  },
+};
+
 const DEFAULT_PROMPT = `你是一个儿童教育专家，也是帮助家庭把问题说清楚、解决得更顺的沟通能手。
 现在你要扮演家庭宠物调解官，名字由外部传入，例如“雪雪”。
 你不是冷酷裁判，而是温柔、可爱、值得信任的家庭宠物大法官。
@@ -307,6 +336,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   commonCaregiverOptions: ["妈妈", "爸爸"],
   apiKey: "",
   systemPrompt: DEFAULT_PROMPT,
+  ttsRole: "sweet",
 };
 
 const DEFAULT_DRAFT: DraftState = {
@@ -481,24 +511,63 @@ function clampAge(age: number) {
   return Math.min(15, Math.max(3, Math.round(age || 7)));
 }
 
+function normalizeBirthdayInput(value: string) {
+  return value
+    .replace(/[.\/]/g, "-")
+    .replace(/年/g, "-")
+    .replace(/月/g, "-")
+    .replace(/日/g, "")
+    .replace(/\s+/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 function calculateAgeFromBirthday(birthday: string) {
-  if (!birthday) {
+  const normalized = normalizeBirthdayInput(birthday);
+  if (!normalized) {
     return null;
   }
 
-  const date = new Date(birthday);
-  if (Number.isNaN(date.getTime())) {
+  const match = normalized.match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/);
+  if (!match) {
     return null;
   }
 
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = monthText ? Number(monthText) : null;
+  const day = dayText ? Number(dayText) : null;
   const now = new Date();
-  let age = now.getFullYear() - date.getFullYear();
-  const birthdayPassed =
-    now.getMonth() > date.getMonth() ||
-    (now.getMonth() === date.getMonth() && now.getDate() >= date.getDate());
 
-  if (!birthdayPassed) {
-    age -= 1;
+  if (!Number.isInteger(year) || year < 1900 || year > now.getFullYear()) {
+    return null;
+  }
+
+  if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) {
+    return null;
+  }
+
+  if (day !== null) {
+    if (month === null) {
+      return null;
+    }
+
+    const daysInMonth = new Date(year, month, 0).getDate();
+    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) {
+      return null;
+    }
+  }
+
+  let age = now.getFullYear() - year;
+  const currentMonth = now.getMonth() + 1;
+  const currentDay = now.getDate();
+
+  if (month !== null) {
+    if (currentMonth < month) {
+      age -= 1;
+    } else if (currentMonth === month && day !== null && currentDay < day) {
+      age -= 1;
+    }
   }
 
   return age >= 0 ? age : null;
@@ -529,18 +598,12 @@ function pickRandom<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-function normalizeCaregivers(input: string) {
-  const list = input
-    .split(/[，,\n]/)
-    .map((item) => collapseText(item))
-    .filter(Boolean)
-    .slice(0, 8);
-
-  return list.length > 0 ? list : DEFAULT_SETTINGS.caregiverOptions;
-}
-
 function normalizeChildGender(value: unknown): ChildGender {
   return value === "boy" || value === "girl" ? value : "unspecified";
+}
+
+function normalizeTtsRole(value: unknown): TtsRole {
+  return value === "sweet" || value === "playful" || value === "gentle" || value === "story" ? value : "sweet";
 }
 
 function normalizeCommonCaregivers(options: string[], favorites: unknown) {
@@ -626,13 +689,12 @@ function detectSafetyRisk(childStatement: string, parentStatement: string) {
   return patterns.some((pattern) => pattern.test(fullText));
 }
 
-function buildHomeOpener(settings: SettingsState, draft: DraftState) {
+function buildHomeOpener(settings: SettingsState, caregiver: string) {
   const pet = PETS[settings.petType];
-  const issueTag = inferIssueTag(draft.childStatement, draft.parentStatement);
   const lines = [
     `${pickRandom(pet.openers)}`,
-    `${settings.petName}想先听清${settings.childName}和${draft.caregiver}心里最在意的那一句。`,
-    `${settings.petName}会先把这次“${issueTag}”的小风波理顺一点，再慢慢陪你们想办法。`,
+    `${settings.petName}想先听清${settings.childName}和${caregiver}心里最在意的那一句。`,
+    `${settings.petName}会先把话里的小刺轻轻放下，再陪你们想一个更顺的办法。`,
   ];
 
   return pickRandom(lines);
@@ -1095,7 +1157,10 @@ export default function App() {
     return {
       ...DEFAULT_SETTINGS,
       ...stored,
+      childBirthday: typeof stored.childBirthday === "string" ? normalizeBirthdayInput(stored.childBirthday) : DEFAULT_SETTINGS.childBirthday,
+      fallbackAge: clampAge(Number(stored.fallbackAge) || DEFAULT_SETTINGS.fallbackAge),
       childGender: normalizeChildGender(stored.childGender),
+      ttsRole: normalizeTtsRole(stored.ttsRole),
       caregiverOptions,
       commonCaregiverOptions: normalizeCommonCaregivers(caregiverOptions, stored.commonCaregiverOptions),
     };
@@ -1119,15 +1184,12 @@ export default function App() {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [visibleBubbles, setVisibleBubbles] = useState(0);
   const [showParentNotes, setShowParentNotes] = useState(false);
+  const [ageInput, setAgeInput] = useState(() => String(clampAge(Number(settings.fallbackAge) || DEFAULT_SETTINGS.fallbackAge)));
   const revealTimersRef = useRef<number[]>([]);
 
   const pet = PETS[settings.petType];
   const commonCaregivers = useMemo(() => getCommonCaregivers(settings), [settings]);
-  const openingLine = useMemo(() => {
-    const token = `${openingSeed}-${draft.childStatement}-${draft.parentStatement}-${draft.caregiver}`;
-    void token;
-    return buildHomeOpener(settings, draft);
-  }, [draft, openingSeed, settings]);
+  const openingLine = useMemo(() => buildHomeOpener(settings, draft.caregiver), [openingSeed, settings, draft.caregiver]);
 
   const activeRecord = useMemo(() => records.find((item) => item.id === activeRecordId) ?? null, [activeRecordId, records]);
   const activeRepairPlans = useMemo(() => (activeRecord ? buildRepairPlans(activeRecord.result) : []), [activeRecord]);
@@ -1138,6 +1200,10 @@ export default function App() {
   useEffect(() => {
     saveStorage(STORAGE_KEYS.settings, settings);
   }, [settings]);
+
+  useEffect(() => {
+    setAgeInput(String(clampAge(Number(settings.fallbackAge) || DEFAULT_SETTINGS.fallbackAge)));
+  }, [settings.fallbackAge]);
 
   useEffect(() => {
     saveStorage(STORAGE_KEYS.draft, draft);
@@ -1350,12 +1416,15 @@ export default function App() {
 
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(activeRecord.result.tts_script);
+    const roleMeta = TTS_ROLE_META[settings.ttsRole];
     utterance.lang = "zh-CN";
-    utterance.rate = 0.95;
-    utterance.pitch = 1.05;
+    utterance.rate = roleMeta.rate;
+    utterance.pitch = roleMeta.pitch;
 
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
+    const preferredVoice =
+      voices.find((voice) => roleMeta.preferredNamePattern?.test(`${voice.lang} ${voice.name}`)) ??
+      voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
     if (preferredVoice) {
       utterance.voice = preferredVoice;
     }
@@ -1526,7 +1595,7 @@ export default function App() {
                 <Card>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-3">
-                      <h3 className="text-sm font-semibold text-slate-900">{activeRecord.result.pet.name}在说</h3>
+                      <h3 className="text-sm font-semibold text-slate-900">{activeRecord.result.pet.name}大法官说</h3>
                       <button
                         type="button"
                         onClick={handlePlayTts}
@@ -1556,7 +1625,7 @@ export default function App() {
                   <div className="space-y-3">
                     <h3 className="text-sm font-semibold text-emerald-900">{activeRecord.result.action_card.title}</h3>
                     <TaskRow label="孩子可以说" value={activeRecord.result.action_card.child_can_say} />
-                    <TaskRow label="家长可以说" value={activeRecord.result.action_card.parent_can_say} />
+                    <TaskRow label={`${activeRecord.draft.caregiver}可以说`} value={activeRecord.result.action_card.parent_can_say} />
                     <div className="rounded-[24px] bg-white/80 p-3">
                       <div className="mb-3 flex items-center justify-between gap-3">
                         <div>
@@ -1801,32 +1870,43 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="rounded-3xl bg-slate-50 px-4 py-3">
                       <label className="text-sm font-semibold text-slate-800">生日</label>
                       <input
-                        type="date"
+                        type="text"
+                        inputMode="numeric"
                         value={settings.childBirthday}
                         onChange={(event) => updateSetting("childBirthday", event.target.value)}
-                        onBlur={() => handleSaveToast("生日已自动保存。")}
+                        onBlur={(event) => {
+                          const normalized = normalizeBirthdayInput(event.target.value);
+                          updateSetting("childBirthday", normalized);
+                          handleSaveToast("生日已自动保存。");
+                        }}
                         className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                        placeholder="例如：2018、2018-09、2018-09-12"
                       />
                     </div>
                     <div className="rounded-3xl bg-slate-50 px-4 py-3">
-                      <label className="text-sm font-semibold text-slate-800">年龄兜底</label>
+                      <label className="text-sm font-semibold text-slate-800">年龄</label>
                       <input
-                        type="number"
-                        min={3}
-                        max={15}
-                        value={settings.fallbackAge}
-                        onChange={(event) => updateSetting("fallbackAge", clampAge(Number(event.target.value) || 7))}
-                        onBlur={() => handleSaveToast("年龄兜底已自动保存。")}
+                        type="text"
+                        inputMode="numeric"
+                        value={ageInput}
+                        onChange={(event) => setAgeInput(event.target.value.replace(/[^\d]/g, "").slice(0, 2))}
+                        onBlur={() => {
+                          const parsedAge = clampAge(Number(ageInput) || settings.fallbackAge || DEFAULT_SETTINGS.fallbackAge);
+                          updateSetting("fallbackAge", parsedAge);
+                          setAgeInput(String(parsedAge));
+                          handleSaveToast("年龄已自动保存。");
+                        }}
                         className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                        placeholder="例如：7"
                       />
                     </div>
                   </div>
                   <div className="rounded-3xl bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-900">
-                    会优先按生日自动判断年龄；没填生日时，再用年龄兜底。
+                    会优先按生日自动判断年龄；只填年份或年月也能计算；没填生日时，再用年龄。
                   </div>
                 </div>
               </Card>
@@ -1834,24 +1914,6 @@ export default function App() {
               <Card>
                 <div className="space-y-4">
                   <div className="text-sm font-semibold text-slate-900">家长称呼</div>
-                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
-                    <label className="text-sm font-semibold text-slate-800">可切换称呼</label>
-                    <textarea
-                      defaultValue={settings.caregiverOptions.join("，")}
-                      onBlur={(event) => {
-                        const nextOptions = normalizeCaregivers(event.target.value);
-                        setSettings((previous) => ({
-                          ...previous,
-                          caregiverOptions: nextOptions,
-                          commonCaregiverOptions: normalizeCommonCaregivers(nextOptions, previous.commonCaregiverOptions),
-                        }));
-                        handleSaveToast("家长称呼已自动保存。");
-                      }}
-                      rows={3}
-                      className="mt-2 w-full resize-none border-0 bg-transparent text-sm leading-7 text-slate-700 outline-none"
-                      placeholder="例如：妈妈，爸爸，姥姥，姥爷，爷爷，奶奶"
-                    />
-                  </div>
                   <div className="rounded-3xl bg-white px-4 py-4 ring-1 ring-slate-100">
                     <div className="text-sm font-semibold text-slate-800">两个常用称呼</div>
                     <p className="mt-1 text-xs leading-6 text-slate-500">前台点“{draft.caregiver}怎么说”时，会在下面选中的两个称呼之间切换。</p>
@@ -1876,6 +1938,34 @@ export default function App() {
                         );
                       })}
                     </div>
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">播放语音</div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <div className="text-sm font-semibold text-slate-800">语音角色</div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {(Object.entries(TTS_ROLE_META) as Array<[TtsRole, (typeof TTS_ROLE_META)[TtsRole]]>).map(([role, meta]) => (
+                        <button
+                          key={role}
+                          type="button"
+                          onClick={() => {
+                            updateSetting("ttsRole", role);
+                            handleSaveToast("语音角色已自动保存。");
+                          }}
+                          className={cn(
+                            "rounded-2xl px-3 py-3 text-sm font-semibold transition",
+                            settings.ttsRole === role ? "bg-slate-900 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200",
+                          )}
+                        >
+                          {meta.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-3 text-xs leading-6 text-slate-500">会尽量优先用更可爱的中文声音；不同设备实际可用语音会有一点差别。</p>
                   </div>
                 </div>
               </Card>
@@ -1924,10 +2014,10 @@ export default function App() {
             <div className={cn("mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-[24px] bg-gradient-to-br text-3xl text-white shadow-lg", pet.accent)}>
               <span className="spin-soft">{pet.writingToolEmoji}</span>
             </div>
-            <div className="space-y-3">
+              <div className="space-y-3">
               <h2 className="text-lg font-semibold text-slate-900">{settings.petName}大法官正在整理判词</h2>
               <div className="rounded-[24px] bg-slate-50 px-4 py-4 text-left">
-                <div className="mb-2 text-xs font-semibold tracking-[0.18em] text-slate-400">{pet.writingToolLabel}正在慢慢写字</div>
+                <div className="mb-2 text-xs font-semibold tracking-[0.18em] text-slate-400">{settings.petName}用{pet.writingToolLabel}在慢慢写字</div>
                 <p className="scratch-write min-h-[84px] text-sm leading-7 text-slate-700">
                   {typedLoadingLine}
                   <span className="paw-cursor">{pet.writingToolEmoji}</span>
