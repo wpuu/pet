@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
-  base: '/',  
+  base: '/pet/',  // 👉 关键修复：换成了你的仓库名字
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
