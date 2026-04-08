@@ -1793,7 +1793,7 @@ export default function App() {
                     className="h-full w-full object-cover"
                     onError={(e) => {
                       // 没替换本地图且没上传头像时，退回展示“戴眼镜的理工男”插画
-                      e.currentTarget.src = "https://api.dicebear.com/7.x/avataaars/svg?seed=baba&backgroundColor=transparent&top=shortHair&accessories=prescription02&facialHair=blank&clothing=blazerAndShirt";
+                      e.currentTarget.src = "https://api.dicebear.com/9.x/big-smile/svg?backgroundType=solid,gradientLinear&accessories=mustache,sailormoonCrown,sleepMask,sunglasses,glasses&backgroundColor=ffd5dc,d1d4f9&seed=Edenh";
                     }}
                   />
                 ) : (settings.petAvatar ? (
