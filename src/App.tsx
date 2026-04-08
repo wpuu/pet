@@ -15,6 +15,7 @@ type SettingsState = {
   childName: string;
   childBirthday: string;
   fallbackAge: number;
+  ageManualOverride: boolean;
   childGender: ChildGender;
   caregiverOptions: string[];
   commonCaregiverOptions: string[];
@@ -244,26 +245,26 @@ const EMOTION_OPTIONS: Emotion[] = ["生气", "委屈", "难过", "不服气", "
 const TTS_ROLE_META: Record<TtsRole, { label: string; rate: number; pitch: number; preferredNamePattern?: RegExp }> = {
   sweet: {
     label: "软萌小奶音",
-    rate: 0.96,
-    pitch: 1.24,
+    rate: 1.04,
+    pitch: 1.22,
     preferredNamePattern: /xiaoxiao|xiaoyi|female|girl|女/i,
   },
   playful: {
     label: "元气小可爱",
-    rate: 1.02,
-    pitch: 1.18,
+    rate: 1.1,
+    pitch: 1.16,
     preferredNamePattern: /xiaoxiao|xiaoyi|yunxi|female|girl|女/i,
   },
   gentle: {
     label: "温柔陪伴音",
-    rate: 0.92,
+    rate: 1.02,
     pitch: 1.08,
     preferredNamePattern: /xiaoyi|xiaoxiao|female|girl|女/i,
   },
   story: {
     label: "童话讲述音",
-    rate: 0.9,
-    pitch: 1.14,
+    rate: 1.03,
+    pitch: 1.12,
     preferredNamePattern: /xiaoxiao|story|female|girl|女/i,
   },
 };
@@ -283,8 +284,9 @@ const DEFAULT_PROMPT = `你是一个儿童教育专家，也是帮助家庭把�
 8. 最后输出温馨结尾和亲密度奖励。
 
 你必须根据 child_profile 中的信息调整表达方式：
-- 如果提供 birthday，则优先根据 birthday 推断年龄；
-- 如果没有 birthday，则使用 age；
+- 如果 age 有值，则优先使用 age；
+- 如果 age 为空且提供 birthday，则根据 birthday 推断年龄；
+- 如果 age 和 birthday 都没有，则按 7 岁理解；
 - 根据年龄自动适配语言风格；
 - 可以参考孩子性别来调整语气和举例，但绝不能使用刻板印象或标签化表达。
 
@@ -331,6 +333,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   childName: "乐乐",
   childBirthday: "",
   fallbackAge: 7,
+  ageManualOverride: false,
   childGender: "unspecified",
   caregiverOptions: ["妈妈", "爸爸", "姥姥", "姥爷", "爷爷", "奶奶"],
   commonCaregiverOptions: ["妈妈", "爸爸"],
@@ -512,6 +515,20 @@ function clampAge(age: number) {
 }
 
 function normalizeBirthdayInput(value: string) {
+  const compact = value.replace(/\s+/g, "").replace(/[年月日.\/]/g, "");
+
+  if (/^\d{8}$/.test(compact)) {
+    return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
+  }
+
+  if (/^\d{6}$/.test(compact)) {
+    return `${compact.slice(0, 4)}-${compact.slice(4, 6)}`;
+  }
+
+  if (/^\d{4}$/.test(compact)) {
+    return compact;
+  }
+
   return value
     .replace(/[.\/]/g, "-")
     .replace(/年/g, "-")
@@ -582,7 +599,8 @@ function getAgeGroup(age: number): AgeGroup {
 
 function resolveChildProfile(settings: SettingsState): ChildProfile {
   const birthdayAge = calculateAgeFromBirthday(settings.childBirthday);
-  const age = clampAge(birthdayAge ?? settings.fallbackAge);
+  const shouldUseManualAge = settings.ageManualOverride || birthdayAge === null;
+  const age = clampAge(shouldUseManualAge ? settings.fallbackAge : birthdayAge ?? DEFAULT_SETTINGS.fallbackAge);
 
   return {
     nickname: collapseText(settings.childName) || DEFAULT_SETTINGS.childName,
@@ -590,7 +608,7 @@ function resolveChildProfile(settings: SettingsState): ChildProfile {
     age,
     age_group: getAgeGroup(age),
     gender: settings.childGender,
-    source: birthdayAge !== null ? "birthday" : "fallback",
+    source: shouldUseManualAge ? "fallback" : "birthday",
   };
 }
 
@@ -1034,7 +1052,8 @@ function normalizeResult(input: unknown, settings: SettingsState, draft: DraftSt
 }
 
 async function requestGeminiResult(settings: SettingsState, draft: DraftState, profile: ChildProfile) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL_NAME)}:generateContent`;
+  // 修改处：将原始的谷歌域名替换为了你的边缘函数域名 wpu.dpdns.org
+  const endpoint = `https://wpu.dpdns.org/v1beta/models/${encodeURIComponent(MODEL_NAME)}:generateContent`;
 
   const response = await fetch(endpoint, {
     method: "POST",
@@ -1159,6 +1178,7 @@ export default function App() {
       ...stored,
       childBirthday: typeof stored.childBirthday === "string" ? normalizeBirthdayInput(stored.childBirthday) : DEFAULT_SETTINGS.childBirthday,
       fallbackAge: clampAge(Number(stored.fallbackAge) || DEFAULT_SETTINGS.fallbackAge),
+      ageManualOverride: typeof stored.ageManualOverride === "boolean" ? stored.ageManualOverride : DEFAULT_SETTINGS.ageManualOverride,
       childGender: normalizeChildGender(stored.childGender),
       ttsRole: normalizeTtsRole(stored.ttsRole),
       caregiverOptions,
@@ -1334,10 +1354,10 @@ export default function App() {
       previous.map((item) =>
         item.id === recordId
           ? {
-              ...item,
-              selectedRepairIndex: index,
-              completedRepairIndex: item.completedRepairIndex === index ? null : index,
-            }
+            ...item,
+            selectedRepairIndex: index,
+            completedRepairIndex: item.completedRepairIndex === index ? null : index,
+          }
           : item,
       ),
     );
@@ -1409,14 +1429,14 @@ export default function App() {
     }
   };
 
-  const handlePlayTts = () => {
-    if (!activeRecord || typeof window === "undefined" || !("speechSynthesis" in window)) {
-      return;
+  const speakWithRole = (text: string, role: TtsRole) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window) || !collapseText(text)) {
+      return false;
     }
 
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(activeRecord.result.tts_script);
-    const roleMeta = TTS_ROLE_META[settings.ttsRole];
+    const utterance = new SpeechSynthesisUtterance(text);
+    const roleMeta = TTS_ROLE_META[role];
     utterance.lang = "zh-CN";
     utterance.rate = roleMeta.rate;
     utterance.pitch = roleMeta.pitch;
@@ -1430,6 +1450,26 @@ export default function App() {
     }
 
     window.speechSynthesis.speak(utterance);
+    return true;
+  };
+
+  const handlePreviewTtsRole = (role: TtsRole) => {
+    const previewText = `${settings.petName}大法官来试一小句啦。今天我们把话慢慢说柔一点，好吗？`;
+    const didSpeak = speakWithRole(previewText, role);
+    if (!didSpeak) {
+      setToast({ message: "当前设备暂时不支持语音试听。", tone: "amber" });
+    }
+  };
+
+  const handlePlayTts = () => {
+    if (!activeRecord) {
+      return;
+    }
+
+    const didSpeak = speakWithRole(activeRecord.result.tts_script, settings.ttsRole);
+    if (!didSpeak) {
+      setToast({ message: "当前设备暂时不支持语音播放。", tone: "amber" });
+    }
   };
 
   return (
@@ -1872,7 +1912,7 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="rounded-3xl bg-slate-50 px-4 py-3">
-                      <label className="text-sm font-semibold text-slate-800">生日</label>
+                      <label className="text-sm font-semibold text-slate-800">生日(20160125)</label>
                       <input
                         type="text"
                         inputMode="numeric"
@@ -1880,11 +1920,24 @@ export default function App() {
                         onChange={(event) => updateSetting("childBirthday", event.target.value)}
                         onBlur={(event) => {
                           const normalized = normalizeBirthdayInput(event.target.value);
-                          updateSetting("childBirthday", normalized);
+                          const birthdayAge = calculateAgeFromBirthday(normalized);
+
+                          setSettings((previous) => ({
+                            ...previous,
+                            childBirthday: normalized,
+                            fallbackAge: birthdayAge !== null && !previous.ageManualOverride ? clampAge(birthdayAge) : previous.fallbackAge,
+                          }));
+
+                          if (birthdayAge !== null && !settings.ageManualOverride) {
+                            setAgeInput(String(clampAge(birthdayAge)));
+                          } else if (!normalized && !settings.ageManualOverride) {
+                            setAgeInput(String(DEFAULT_SETTINGS.fallbackAge));
+                          }
+
                           handleSaveToast("生日已自动保存。");
                         }}
                         className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
-                        placeholder="例如：2018、2018-09、2018-09-12"
+                        placeholder="可填 2016、201601 或 20160125"
                       />
                     </div>
                     <div className="rounded-3xl bg-slate-50 px-4 py-3">
@@ -1895,8 +1948,27 @@ export default function App() {
                         value={ageInput}
                         onChange={(event) => setAgeInput(event.target.value.replace(/[^\d]/g, "").slice(0, 2))}
                         onBlur={() => {
-                          const parsedAge = clampAge(Number(ageInput) || settings.fallbackAge || DEFAULT_SETTINGS.fallbackAge);
-                          updateSetting("fallbackAge", parsedAge);
+                          const digits = ageInput.replace(/[^\d]/g, "");
+
+                          if (!digits) {
+                            const birthdayAge = calculateAgeFromBirthday(settings.childBirthday);
+                            const nextAge = clampAge(birthdayAge ?? DEFAULT_SETTINGS.fallbackAge);
+                            setSettings((previous) => ({
+                              ...previous,
+                              fallbackAge: nextAge,
+                              ageManualOverride: false,
+                            }));
+                            setAgeInput(String(nextAge));
+                            handleSaveToast("年龄已自动保存。");
+                            return;
+                          }
+
+                          const parsedAge = clampAge(Number(digits));
+                          setSettings((previous) => ({
+                            ...previous,
+                            fallbackAge: parsedAge,
+                            ageManualOverride: true,
+                          }));
                           setAgeInput(String(parsedAge));
                           handleSaveToast("年龄已自动保存。");
                         }}
@@ -1906,7 +1978,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="rounded-3xl bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-900">
-                    会优先按生日自动判断年龄；只填年份或年月也能计算；没填生日时，再用年龄。
+                    两个都不填时默认按 7 岁；填了生日会自动回填年龄；生日和年龄都存在时，以年龄为准。
                   </div>
                 </div>
               </Card>
@@ -1954,18 +2026,20 @@ export default function App() {
                           type="button"
                           onClick={() => {
                             updateSetting("ttsRole", role);
-                            handleSaveToast("语音角色已自动保存。");
+                            handlePreviewTtsRole(role);
+                            handleSaveToast("语音角色已自动保存，并已试听一小句。");
                           }}
                           className={cn(
                             "rounded-2xl px-3 py-3 text-sm font-semibold transition",
                             settings.ttsRole === role ? "bg-slate-900 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200",
                           )}
                         >
-                          {meta.label}
+                          <span className="block">{meta.label}</span>
+                          <span className="mt-1 block text-[11px] font-medium opacity-75">点一下试听</span>
                         </button>
                       ))}
                     </div>
-                    <p className="mt-3 text-xs leading-6 text-slate-500">会尽量优先用更可爱的中文声音；不同设备实际可用语音会有一点差别。</p>
+                    <p className="mt-3 text-xs leading-6 text-slate-500">点选时会自动试听；不同手机和浏览器能用的中文语音不完全一样，所以听起来会有一点差别。</p>
                   </div>
                 </div>
               </Card>
@@ -2014,7 +2088,7 @@ export default function App() {
             <div className={cn("mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-[24px] bg-gradient-to-br text-3xl text-white shadow-lg", pet.accent)}>
               <span className="spin-soft">{pet.writingToolEmoji}</span>
             </div>
-              <div className="space-y-3">
+            <div className="space-y-3">
               <h2 className="text-lg font-semibold text-slate-900">{settings.petName}大法官正在整理判词</h2>
               <div className="rounded-[24px] bg-slate-50 px-4 py-4 text-left">
                 <div className="mb-2 text-xs font-semibold tracking-[0.18em] text-slate-400">{settings.petName}用{pet.writingToolLabel}在慢慢写字</div>
