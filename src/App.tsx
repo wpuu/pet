@@ -7,11 +7,11 @@ type Emotion = "生气" | "委屈" | "难过" | "不服气" | "担心" | "平静
 type AgeGroup = "3_5" | "6_8" | "9_12" | "13_15";
 type Source = "gemini" | "demo" | "safety";
 type ChildGender = "boy" | "girl" | "unspecified";
-type TtsRole = "sweet" | "playful" | "gentle" | "story";
 
 type SettingsState = {
   petName: string;
   petType: PetType;
+  petAvatar: string;
   childName: string;
   childBirthday: string;
   fallbackAge: number;
@@ -19,9 +19,11 @@ type SettingsState = {
   childGender: ChildGender;
   caregiverOptions: string[];
   commonCaregiverOptions: string[];
-  apiKey: string;
   systemPrompt: string;
-  ttsRole: TtsRole;
+  // API配置项，防止代理挂掉时彻底无法使用
+  apiKey: string;
+  apiEndpoint: string;
+  modelName: string;
 };
 
 type DraftState = {
@@ -130,8 +132,6 @@ type AgeMeta = {
   metaphorType: string;
   childWordLimit: string;
 };
-
-const MODEL_NAME = "gemini-3.1-flash-lite-preview";
 
 const STORAGE_KEYS = {
   settings: "pet-judge-settings-v2",
@@ -242,33 +242,6 @@ const AGE_META: Record<AgeGroup, AgeMeta> = {
 
 const EMOTION_OPTIONS: Emotion[] = ["生气", "委屈", "难过", "不服气", "担心", "平静"];
 
-const TTS_ROLE_META: Record<TtsRole, { label: string; rate: number; pitch: number; preferredNamePattern?: RegExp }> = {
-  sweet: {
-    label: "软萌小奶音",
-    rate: 1.04,
-    pitch: 1.22,
-    preferredNamePattern: /xiaoxiao|xiaoyi|female|girl|女/i,
-  },
-  playful: {
-    label: "元气小可爱",
-    rate: 1.1,
-    pitch: 1.16,
-    preferredNamePattern: /xiaoxiao|xiaoyi|yunxi|female|girl|女/i,
-  },
-  gentle: {
-    label: "温柔陪伴音",
-    rate: 1.02,
-    pitch: 1.08,
-    preferredNamePattern: /xiaoyi|xiaoxiao|female|girl|女/i,
-  },
-  story: {
-    label: "童话讲述音",
-    rate: 1.03,
-    pitch: 1.12,
-    preferredNamePattern: /xiaoxiao|story|female|girl|女/i,
-  },
-};
-
 const DEFAULT_PROMPT = `你是一个儿童教育专家，也是帮助家庭把问题说清楚、解决得更顺的沟通能手。
 现在你要扮演家庭宠物调解官，名字由外部传入，例如“雪雪”。
 你不是冷酷裁判，而是温柔、可爱、值得信任的家庭宠物大法官。
@@ -286,7 +259,7 @@ const DEFAULT_PROMPT = `你是一个儿童教育专家，也是帮助家庭把�
 你必须根据 child_profile 中的信息调整表达方式：
 - 如果 age 有值，则优先使用 age；
 - 如果 age 为空且提供 birthday，则根据 birthday 推断年龄；
-- 如果 age 和 birthday 都没有，则按 7 岁理解；
+- 如果 age 和 birthday 都没有，则按 10 岁理解；
 - 根据年龄自动适配语言风格；
 - 可以参考孩子性别来调整语气和举例，但绝不能使用刻板印象或标签化表达。
 
@@ -330,16 +303,18 @@ emotion_summary.child 和 emotion_summary.parent 只能从以下词中选择一�
 const DEFAULT_SETTINGS: SettingsState = {
   petName: "雪雪",
   petType: "cat",
+  petAvatar: "",
   childName: "乐乐",
   childBirthday: "",
-  fallbackAge: 7,
+  fallbackAge: 10,
   ageManualOverride: false,
-  childGender: "unspecified",
+  childGender: "girl",
   caregiverOptions: ["妈妈", "爸爸", "姥姥", "姥爷", "爷爷", "奶奶"],
   commonCaregiverOptions: ["妈妈", "爸爸"],
-  apiKey: "",
   systemPrompt: DEFAULT_PROMPT,
-  ttsRole: "sweet",
+  apiKey: "",
+  apiEndpoint: "https://wpu.dpdns.org", // 默认保留你的地址
+  modelName: "gemini-3.1-flash-lite-preview", // 默认保留你指定的 2026 最新模型
 };
 
 const DEFAULT_DRAFT: DraftState = {
@@ -454,12 +429,10 @@ function readStorage<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") {
     return fallback;
   }
-
   const raw = window.localStorage.getItem(key);
   if (!raw) {
     return fallback;
   }
-
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -471,7 +444,6 @@ function saveStorage<T>(key: string, value: T) {
   if (typeof window === "undefined") {
     return;
   }
-
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
@@ -484,7 +456,6 @@ function shortenText(text: string, maxLength = 26) {
   if (!compact) {
     return "";
   }
-
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
 }
 
@@ -492,7 +463,6 @@ function createId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
-
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -501,7 +471,6 @@ function formatDateTime(value: string) {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -511,24 +480,20 @@ function formatDateTime(value: string) {
 }
 
 function clampAge(age: number) {
-  return Math.min(15, Math.max(3, Math.round(age || 7)));
+  return Math.min(15, Math.max(3, Math.round(age || 10)));
 }
 
 function normalizeBirthdayInput(value: string) {
   const compact = value.replace(/\s+/g, "").replace(/[年月日.\/]/g, "");
-
   if (/^\d{8}$/.test(compact)) {
     return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
   }
-
   if (/^\d{6}$/.test(compact)) {
     return `${compact.slice(0, 4)}-${compact.slice(4, 6)}`;
   }
-
   if (/^\d{4}$/.test(compact)) {
     return compact;
   }
-
   return value
     .replace(/[.\/]/g, "-")
     .replace(/年/g, "-")
@@ -541,14 +506,9 @@ function normalizeBirthdayInput(value: string) {
 
 function calculateAgeFromBirthday(birthday: string) {
   const normalized = normalizeBirthdayInput(birthday);
-  if (!normalized) {
-    return null;
-  }
-
+  if (!normalized) return null;
   const match = normalized.match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/);
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
 
   const [, yearText, monthText, dayText] = match;
   const year = Number(yearText);
@@ -556,23 +516,12 @@ function calculateAgeFromBirthday(birthday: string) {
   const day = dayText ? Number(dayText) : null;
   const now = new Date();
 
-  if (!Number.isInteger(year) || year < 1900 || year > now.getFullYear()) {
-    return null;
-  }
-
-  if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) {
-    return null;
-  }
-
+  if (!Number.isInteger(year) || year < 1900 || year > now.getFullYear()) return null;
+  if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) return null;
   if (day !== null) {
-    if (month === null) {
-      return null;
-    }
-
+    if (month === null) return null;
     const daysInMonth = new Date(year, month, 0).getDate();
-    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) {
-      return null;
-    }
+    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) return null;
   }
 
   let age = now.getFullYear() - year;
@@ -617,11 +566,7 @@ function pickRandom<T>(items: T[]) {
 }
 
 function normalizeChildGender(value: unknown): ChildGender {
-  return value === "boy" || value === "girl" ? value : "unspecified";
-}
-
-function normalizeTtsRole(value: unknown): TtsRole {
-  return value === "sweet" || value === "playful" || value === "gentle" || value === "story" ? value : "sweet";
+  return value === "boy" || value === "girl" ? value : "girl";
 }
 
 function normalizeCommonCaregivers(options: string[], favorites: unknown) {
@@ -646,45 +591,21 @@ function getCommonCaregivers(settings: SettingsState) {
 
 function inferEmotion(text: string, role: "child" | "parent"): Emotion {
   const source = collapseText(text);
+  if (!source) return role === "parent" ? "担心" : "平静";
 
-  if (!source) {
-    return role === "parent" ? "担心" : "平静";
-  }
-
-  if (/(气死|生气|火大|烦死|讨厌|别管|不要烦|吼|大喊)/.test(source)) {
-    return "生气";
-  }
-
-  if (/(委屈|不理解|冤枉|偏心|根本不懂|都不听我|老说我)/.test(source)) {
-    return "委屈";
-  }
-
-  if (/(难过|伤心|想哭|哭了|失望|心里难受)/.test(source)) {
-    return "难过";
-  }
-
-  if (/(凭什么|不服|才不要|不想听|就是不|不公平)/.test(source)) {
-    return "不服气";
-  }
-
-  if (/(担心|怕|来不及|拖太晚|影响|跟不上|不好|出事|完不成)/.test(source)) {
-    return "担心";
-  }
-
-  if (role === "parent" && /(先|必须|应该|赶紧|马上|立刻)/.test(source)) {
-    return "担心";
-  }
-
-  if (role === "child" && /(想|可不可以|能不能|我想先)/.test(source)) {
-    return "委屈";
-  }
+  if (/(气死|生气|火大|烦死|讨厌|别管|不要烦|吼|大喊)/.test(source)) return "生气";
+  if (/(委屈|不理解|冤枉|偏心|根本不懂|都不听我|老说我)/.test(source)) return "委屈";
+  if (/(难过|伤心|想哭|哭了|失望|心里难受)/.test(source)) return "难过";
+  if (/(凭什么|不服|才不要|不想听|就是不|不公平)/.test(source)) return "不服气";
+  if (/(担心|怕|来不及|拖太晚|影响|跟不上|不好|出事|完不成)/.test(source)) return "担心";
+  if (role === "parent" && /(先|必须|应该|赶紧|马上|立刻)/.test(source)) return "担心";
+  if (role === "child" && /(想|可不可以|能不能|我想先)/.test(source)) return "委屈";
 
   return "平静";
 }
 
 function inferIssueTag(childStatement: string, parentStatement: string) {
   const fullText = `${childStatement} ${parentStatement}`;
-
   if (/作业|写作业|练琴|学习|复习|考试/.test(fullText)) return "作业安排";
   if (/手机|平板|电视|动画|游戏|刷视频/.test(fullText)) return "屏幕时间";
   if (/睡觉|起床|晚睡|午睡/.test(fullText)) return "作息安排";
@@ -703,7 +624,6 @@ function detectSafetyRisk(childStatement: string, parentStatement: string) {
     /威胁|恐吓|拿刀|拿棍|报警抓你|离家出走/,
     /长期辱骂|天天骂|滚出去|不要你了|恨你/,
   ];
-
   return patterns.some((pattern) => pattern.test(fullText));
 }
 
@@ -714,7 +634,6 @@ function buildHomeOpener(settings: SettingsState, caregiver: string) {
     `${settings.petName}想先听清${settings.childName}和${caregiver}心里最在意的那一句。`,
     `${settings.petName}会先把话里的小刺轻轻放下，再陪你们想一个更顺的办法。`,
   ];
-
   return pickRandom(lines);
 }
 
@@ -731,7 +650,6 @@ function buildLoadingLine(settings: SettingsState, draft: DraftState) {
     `${pet.firstPerson}正在顺着孩子的${childEmotion}和${draft.caregiver}的${parentEmotion}，找一个更容易说出口的办法。`,
     `${settings.petName}正在理清这次“${issueTag}”的小风波，准备给出更温和的判词。`,
   ];
-
   return pickRandom(lines);
 }
 
@@ -1052,14 +970,24 @@ function normalizeResult(input: unknown, settings: SettingsState, draft: DraftSt
 }
 
 async function requestGeminiResult(settings: SettingsState, draft: DraftState, profile: ChildProfile) {
-  // 修改处：将原始的谷歌域名替换为了你的边缘函数域名 wpu.dpdns.org
-  const endpoint = `https://wpu.dpdns.org/v1beta/models/${encodeURIComponent(MODEL_NAME)}:generateContent`;
+  // 组装API请求地址
+  let baseUrl = (settings.apiEndpoint || "https://generativelanguage.googleapis.com").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    baseUrl = `https://${baseUrl}`;
+  }
 
-  const response = await fetch(endpoint, {
+  const model = (settings.modelName || "gemini-3.1-flash-lite-preview").trim();
+  const url = new URL(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`);
+
+  // 如果填入了API Key则附加
+  if (settings.apiKey?.trim()) {
+    url.searchParams.append("key", settings.apiKey.trim());
+  }
+
+  const response = await fetch(url.toString(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-goog-api-key": settings.apiKey.trim(),
     },
     body: JSON.stringify({
       contents: [
@@ -1079,12 +1007,17 @@ async function requestGeminiResult(settings: SettingsState, draft: DraftState, p
         responseMimeType: "application/json",
         responseJsonSchema: MEDIATION_SCHEMA,
       },
-      store: false,
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`Gemini request failed: ${response.status}`);
+    let errText = "";
+    try {
+      errText = await response.text();
+    } catch {
+      errText = "无法读取服务器的错误详情";
+    }
+    throw new Error(`[${response.status}] HTTP Error: ${errText}`);
   }
 
   const data = (await response.json()) as GeminiResponse;
@@ -1180,9 +1113,11 @@ export default function App() {
       fallbackAge: clampAge(Number(stored.fallbackAge) || DEFAULT_SETTINGS.fallbackAge),
       ageManualOverride: typeof stored.ageManualOverride === "boolean" ? stored.ageManualOverride : DEFAULT_SETTINGS.ageManualOverride,
       childGender: normalizeChildGender(stored.childGender),
-      ttsRole: normalizeTtsRole(stored.ttsRole),
       caregiverOptions,
       commonCaregiverOptions: normalizeCommonCaregivers(caregiverOptions, stored.commonCaregiverOptions),
+      apiKey: stored.apiKey ?? DEFAULT_SETTINGS.apiKey,
+      apiEndpoint: stored.apiEndpoint ?? DEFAULT_SETTINGS.apiEndpoint,
+      modelName: stored.modelName ?? DEFAULT_SETTINGS.modelName,
     };
   });
   const [draft, setDraft] = useState<DraftState>(() => {
@@ -1246,8 +1181,7 @@ export default function App() {
     if (!toast) {
       return undefined;
     }
-
-    const timer = window.setTimeout(() => setToast(null), 2200);
+    const timer = window.setTimeout(() => setToast(null), 8000);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -1255,7 +1189,6 @@ export default function App() {
     if (view !== "result" || !activeRecord) {
       return undefined;
     }
-
     revealTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     setVisibleBubbles(0);
     revealTimersRef.current = Array.from({ length: 5 }, (_, index) =>
@@ -1263,7 +1196,6 @@ export default function App() {
         setVisibleBubbles(index + 1);
       }, 120 + index * 180),
     );
-
     return () => {
       revealTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     };
@@ -1282,7 +1214,6 @@ export default function App() {
       setTypedLoadingLine("");
       return undefined;
     }
-
     setTypedLoadingLine("");
     let index = 0;
     const timer = window.setInterval(() => {
@@ -1292,7 +1223,6 @@ export default function App() {
         window.clearInterval(timer);
       }
     }, 42);
-
     return () => window.clearInterval(timer);
   }, [isGenerating, loadingLine]);
 
@@ -1323,7 +1253,6 @@ export default function App() {
       if (previous.commonCaregiverOptions.includes(name)) {
         return previous;
       }
-
       const next = [...previous.commonCaregiverOptions, name].slice(-2);
       return {
         ...previous,
@@ -1336,12 +1265,10 @@ export default function App() {
     if (commonCaregivers.length === 0) {
       return;
     }
-
     if (commonCaregivers.length === 1) {
       updateDraft("caregiver", commonCaregivers[0] ?? DEFAULT_DRAFT.caregiver);
       return;
     }
-
     updateDraft("caregiver", draft.caregiver === commonCaregivers[0] ? commonCaregivers[1] : commonCaregivers[0]);
   };
 
@@ -1373,6 +1300,41 @@ export default function App() {
     setToast({ message, tone: "pink" });
   };
 
+  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxSize = 200;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxSize) {
+            height *= maxSize / width;
+            width = maxSize;
+          }
+        } else {
+          if (height > maxSize) {
+            width *= maxSize / height;
+            height = maxSize;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+        updateSetting("petAvatar", dataUrl);
+        setToast({ message: "头像已保存", tone: "pink" });
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleGenerate = async () => {
     if (!collapseText(draft.childStatement) || !collapseText(draft.parentStatement)) {
       setToast({ message: "先把双方的话写上，再请大法官出庭哦。", tone: "amber" });
@@ -1392,18 +1354,16 @@ export default function App() {
       if (detectSafetyRisk(draft.childStatement, draft.parentStatement)) {
         result = buildSafetyResult(settings, draft, currentProfile);
         source = "safety";
-      } else if (settings.apiKey.trim()) {
+      } else {
         try {
           result = await requestGeminiResult(settings, draft, currentProfile);
           source = result.safety.mode === "alert" ? "safety" : "gemini";
-        } catch {
+        } catch (err: any) {
+          console.error("=== 详细错误日志 ===\n", err);
           result = buildDemoCopy(settings, draft, currentProfile);
           source = "demo";
-          setToast({ message: "Gemini 调用失败，已切换为本地演示判词。", tone: "amber" });
+          setToast({ message: `API报错: ${err.message}`, tone: "amber" });
         }
-      } else {
-        result = buildDemoCopy(settings, draft, currentProfile);
-        source = "demo";
       }
 
       const record: RecordItem = {
@@ -1411,10 +1371,7 @@ export default function App() {
         createdAt: new Date().toISOString(),
         draft: { ...draft },
         result,
-        meta: {
-          source,
-          issueTag,
-        },
+        meta: { source, issueTag },
         selectedRepairIndex: 0,
         completedRepairIndex: null,
       };
@@ -1423,53 +1380,45 @@ export default function App() {
       setActiveRecordId(record.id);
       setShowParentNotes(false);
       setView("result");
-      setToast({ message: source === "gemini" ? "新的判词已经出来了。" : "已经整理好一份可继续体验的判词。", tone: "dark" });
+
+      if (source === "gemini") {
+        setToast({ message: "新的判词已经出来了。", tone: "dark" });
+      }
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const speakWithRole = (text: string, role: TtsRole) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window) || !collapseText(text)) {
-      return false;
-    }
-
+  const speakText = (text: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window) || !collapseText(text)) return false;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    const roleMeta = TTS_ROLE_META[role];
     utterance.lang = "zh-CN";
-    utterance.rate = roleMeta.rate;
-    utterance.pitch = roleMeta.pitch;
+    utterance.rate = 1.05;
+    utterance.pitch = 1.15;
 
     const voices = window.speechSynthesis.getVoices();
     const preferredVoice =
-      voices.find((voice) => roleMeta.preferredNamePattern?.test(`${voice.lang} ${voice.name}`)) ??
+      voices.find((voice) => /Xiaobei|zh-CN-liaoning/i.test(`${voice.lang} ${voice.name}`)) ??
       voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
+
     if (preferredVoice) {
       utterance.voice = preferredVoice;
     }
-
     window.speechSynthesis.speak(utterance);
     return true;
   };
 
-  const handlePreviewTtsRole = (role: TtsRole) => {
+  const handleTestVoice = () => {
     const previewText = `${settings.petName}大法官来试一小句啦。今天我们把话慢慢说柔一点，好吗？`;
-    const didSpeak = speakWithRole(previewText, role);
-    if (!didSpeak) {
-      setToast({ message: "当前设备暂时不支持语音试听。", tone: "amber" });
-    }
+    const didSpeak = speakText(previewText);
+    if (!didSpeak) setToast({ message: "当前设备暂时不支持语音试听。", tone: "amber" });
   };
 
   const handlePlayTts = () => {
-    if (!activeRecord) {
-      return;
-    }
-
-    const didSpeak = speakWithRole(activeRecord.result.tts_script, settings.ttsRole);
-    if (!didSpeak) {
-      setToast({ message: "当前设备暂时不支持语音播放。", tone: "amber" });
-    }
+    if (!activeRecord) return;
+    const didSpeak = speakText(activeRecord.result.tts_script);
+    if (!didSpeak) setToast({ message: "当前设备暂时不支持语音播放。", tone: "amber" });
   };
 
   return (
@@ -1480,8 +1429,12 @@ export default function App() {
           <div className="absolute -left-8 bottom-0 h-24 w-24 rounded-full bg-sky-200/35 blur-3xl" />
           <div className="relative flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className={cn("float-soft flex h-14 w-14 items-center justify-center rounded-[22px] bg-gradient-to-br text-3xl text-white shadow-lg", pet.accent)}>
-                {pet.emoji}
+              <div className={cn("float-soft flex h-14 w-14 items-center justify-center rounded-[22px] bg-gradient-to-br text-3xl text-white shadow-lg overflow-hidden", pet.accent)}>
+                {settings.petAvatar ? (
+                  <img src={settings.petAvatar} alt="Pet Avatar" className="h-full w-full object-cover" />
+                ) : (
+                  pet.emoji
+                )}
               </div>
               <div>
                 <h1 className="text-xl font-semibold tracking-tight">{settings.petName}大法官</h1>
@@ -1843,6 +1796,50 @@ export default function App() {
 
               <Card>
                 <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">API 接口设置 (修复报错/Failed to fetch)</div>
+
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">API 地址 (Endpoint)</label>
+                    <input
+                      value={settings.apiEndpoint}
+                      onChange={(event) => updateSetting("apiEndpoint", event.target.value)}
+                      onBlur={() => handleSaveToast("API地址已自动保存。")}
+                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                      placeholder="例如：https://generativelanguage.googleapis.com"
+                    />
+                  </div>
+
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">模型名称 (Model)</label>
+                    <input
+                      value={settings.modelName}
+                      onChange={(event) => updateSetting("modelName", event.target.value)}
+                      onBlur={() => handleSaveToast("模型名称已自动保存。")}
+                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                      placeholder="例如：gemini-3.1-flash-lite-preview"
+                    />
+                  </div>
+
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">API Key</label>
+                    <input
+                      type="password"
+                      value={settings.apiKey}
+                      onChange={(event) => updateSetting("apiKey", event.target.value)}
+                      onBlur={() => handleSaveToast("API Key 已自动保存。")}
+                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                      placeholder="如果需要验证凭证，请填入"
+                    />
+                  </div>
+
+                  <div className="rounded-3xl bg-rose-50 px-4 py-3 text-sm leading-7 text-rose-900">
+                    注意：如果出现 <span className="font-semibold text-rose-700">Failed to fetch</span> 或 <span className="font-semibold text-rose-700">500 Internal Server Error</span>，通常是代理地址失效或由于跨域被拦截。请换用其他可用代理，或换回官方地址配 Key。
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-4">
                   <div className="text-sm font-semibold text-slate-900">宠物设置</div>
                   <div className="grid grid-cols-3 gap-3">
                     {(["cat", "dog", "rabbit"] as PetType[]).map((type) => (
@@ -1868,6 +1865,24 @@ export default function App() {
                       className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
                       placeholder="例如：雪雪"
                     />
+                  </div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">自定义宠物头像</label>
+                    <div className="mt-3 flex items-center gap-3">
+                      {settings.petAvatar && (
+                        <img src={settings.petAvatar} alt="Pet Avatar" className="h-12 w-12 rounded-xl object-cover shadow-sm bg-white" />
+                      )}
+                      <label className="cursor-pointer rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50">
+                        上传图片
+                        <input type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
+                      </label>
+                      {settings.petAvatar && (
+                        <button type="button" onClick={() => updateSetting("petAvatar", "")} className="rounded-2xl px-3 py-2 text-xs font-semibold text-rose-500 hover:bg-rose-50 transition">
+                          清除
+                        </button>
+                      )}
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">上传后会替换左上角的 Emoji 图标。</p>
                   </div>
                 </div>
               </Card>
@@ -1937,7 +1952,7 @@ export default function App() {
                           handleSaveToast("生日已自动保存。");
                         }}
                         className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
-                        placeholder="可填 2016、201601 或 20160125"
+                        placeholder="可填 2016 或 20160125"
                       />
                     </div>
                     <div className="rounded-3xl bg-slate-50 px-4 py-3">
@@ -1949,7 +1964,6 @@ export default function App() {
                         onChange={(event) => setAgeInput(event.target.value.replace(/[^\d]/g, "").slice(0, 2))}
                         onBlur={() => {
                           const digits = ageInput.replace(/[^\d]/g, "");
-
                           if (!digits) {
                             const birthdayAge = calculateAgeFromBirthday(settings.childBirthday);
                             const nextAge = clampAge(birthdayAge ?? DEFAULT_SETTINGS.fallbackAge);
@@ -1962,7 +1976,6 @@ export default function App() {
                             handleSaveToast("年龄已自动保存。");
                             return;
                           }
-
                           const parsedAge = clampAge(Number(digits));
                           setSettings((previous) => ({
                             ...previous,
@@ -1973,12 +1986,12 @@ export default function App() {
                           handleSaveToast("年龄已自动保存。");
                         }}
                         className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
-                        placeholder="例如：7"
+                        placeholder="例如：10"
                       />
                     </div>
                   </div>
                   <div className="rounded-3xl bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-900">
-                    两个都不填时默认按 7 岁；填了生日会自动回填年龄；生日和年龄都存在时，以年龄为准。
+                    两个都不填时默认按 10 岁；填了生日会自动回填年龄；生日和年龄都存在时，以年龄为准。
                   </div>
                 </div>
               </Card>
@@ -2016,50 +2029,19 @@ export default function App() {
 
               <Card>
                 <div className="space-y-4">
-                  <div className="text-sm font-semibold text-slate-900">播放语音</div>
-                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
-                    <div className="text-sm font-semibold text-slate-800">语音角色</div>
-                    <div className="mt-3 grid grid-cols-2 gap-2">
-                      {(Object.entries(TTS_ROLE_META) as Array<[TtsRole, (typeof TTS_ROLE_META)[TtsRole]]>).map(([role, meta]) => (
-                        <button
-                          key={role}
-                          type="button"
-                          onClick={() => {
-                            updateSetting("ttsRole", role);
-                            handlePreviewTtsRole(role);
-                            handleSaveToast("语音角色已自动保存，并已试听一小句。");
-                          }}
-                          className={cn(
-                            "rounded-2xl px-3 py-3 text-sm font-semibold transition",
-                            settings.ttsRole === role ? "bg-slate-900 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200",
-                          )}
-                        >
-                          <span className="block">{meta.label}</span>
-                          <span className="mt-1 block text-[11px] font-medium opacity-75">点一下试听</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-3 text-xs leading-6 text-slate-500">点选时会自动试听；不同手机和浏览器能用的中文语音不完全一样，所以听起来会有一点差别。</p>
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-900">语音播报体验测试</div>
+                    <button
+                      type="button"
+                      onClick={handleTestVoice}
+                      className="rounded-2xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition hover:bg-slate-800"
+                    >
+                      点此播放测试语音
+                    </button>
                   </div>
-                </div>
-              </Card>
-
-              <Card>
-                <div className="space-y-4">
-                  <div className="text-sm font-semibold text-slate-900">Gemini 测试</div>
-                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
-                    <label className="text-sm font-semibold text-slate-800">API Key（隐藏）</label>
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      value={settings.apiKey}
-                      onChange={(event) => updateSetting("apiKey", event.target.value)}
-                      onBlur={() => handleSaveToast("测试 Key 已隐藏并自动保存。")}
-                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
-                      placeholder="粘贴测试 Key，离开输入框自动保存"
-                    />
-                    <p className="mt-2 text-xs leading-5 text-slate-500">前台只用于测试调用。正式上线建议改成你自己的后端转发，不把 Key 放到客户端。</p>
-                  </div>
+                  <p className="text-xs leading-6 text-slate-500">
+                    已默认指定为系统中的东北小北音色(如不支持则降级为默认中文)。设备环境不同音色可能有差异。
+                  </p>
                 </div>
               </Card>
 
@@ -2085,8 +2067,17 @@ export default function App() {
       {isGenerating ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 px-6 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-[32px] border border-white/60 bg-white/92 p-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
-            <div className={cn("mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-[24px] bg-gradient-to-br text-3xl text-white shadow-lg", pet.accent)}>
-              <span className="spin-soft">{pet.writingToolEmoji}</span>
+            <div className="mx-auto mb-4 flex items-center justify-center gap-4">
+              <div className={cn("flex h-16 w-16 items-center justify-center rounded-[24px] bg-gradient-to-br text-3xl text-white shadow-lg overflow-hidden", pet.accent)}>
+                {settings.petAvatar ? (
+                  <img src={settings.petAvatar} alt="Pet Avatar" className="h-full w-full object-cover" />
+                ) : (
+                  pet.emoji
+                )}
+              </div>
+              <div className="text-4xl text-slate-600 spin-soft">
+                {pet.writingToolEmoji}
+              </div>
             </div>
             <div className="space-y-3">
               <h2 className="text-lg font-semibold text-slate-900">{settings.petName}大法官正在整理判词</h2>
