@@ -446,7 +446,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   caregiverOptions: ["妈妈", "爸爸", "姥姥", "姥爷", "爷爷", "奶奶"],
   commonCaregiverOptions: ["妈妈", "爸爸"],
   systemPrompt: DEFAULT_PROMPT,
-  apiKey: "",
+  apiKey: "12345",
   apiEndpoint: "https://wpu.dpdns.org",
   modelName: "gemini-3.1-flash-lite-preview",
 };
