@@ -1,0 +1,2689 @@
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { cn } from "@/utils/cn";
+
+type View = "home" | "result" | "records" | "settings";
+type PetType = "cat" | "dog" | "rabbit";
+type Emotion = "生气" | "委屈" | "难过" | "不服气" | "担心" | "平静";
+type AgeGroup = "3_5" | "6_8" | "9_12" | "13_15";
+type Source = "gemini" | "demo" | "safety";
+type ChildGender = "boy" | "girl" | "unspecified";
+
+type SettingsState = {
+  petName: string;
+  petType: PetType;
+  petAvatar: string;
+  childName: string;
+  childBirthday: string;
+  fallbackAge: number;
+  ageManualOverride: boolean;
+  childGender: ChildGender;
+  caregiverOptions: string[];
+  commonCaregiverOptions: string[];
+  systemPrompt: string;
+  apiKey: string;
+  apiEndpoint: string;
+  modelName: string;
+};
+
+type DraftState = {
+  caregiver: string;
+  childStatement: string;
+  parentStatement: string;
+};
+
+type ChildProfile = {
+  nickname: string;
+  age: number;
+  age_group: AgeGroup;
+  birthday: string;
+  gender: ChildGender;
+  source: "birthday" | "fallback";
+};
+
+type DadModeData = {
+  case_analysis: {
+    core_conflict: string;
+    daughter_needs: string[];
+    mother_needs: string[];
+  };
+  dad_to_daughter: string;
+  dad_to_mom: string;
+  bridge_script: {
+    dad_says_now: string[];
+    daughter_can_say: string[];
+    mom_can_say: string[];
+  };
+  solution_plan: {
+    option_A: { name: string; steps: string[] };
+    option_B: { name: string; steps: string[] };
+  };
+  micro_agreement: {
+    today_rule: string;
+    next_time_signal: string;
+    repair_if_broken: string;
+  };
+  repair_action: {
+    do_now: string;
+    time_needed_minutes: number;
+  };
+  closing: {
+    message: string;
+    intimacy_reward: string;
+  };
+};
+
+type MediationResult = {
+  pet: {
+    name: string;
+    type: PetType;
+    title: string;
+  };
+  child_profile: {
+    nickname: string;
+    age: number;
+    age_group: AgeGroup;
+    birthday: string;
+  };
+  emotion_summary: {
+    child: Emotion;
+    parent: Emotion;
+  };
+  // 原有模式使用的字段（可选）
+  child_view?: {
+    opening: string;
+    observation: string;
+    judgment_short: string;
+    action_short: string;
+    closing: string;
+  };
+  action_card?: {
+    title: string;
+    do_now: string;
+    child_can_say: string;
+    parent_can_say: string;
+    repair_action: string;
+  };
+  parent_view?: {
+    issue_summary: string;
+    fair_judgment: string;
+    child_learning: string;
+    parent_guidance: string;
+  };
+
+  // 爸爸模式特有的字段
+  is_dad_mode?: boolean;
+  dad_data?: DadModeData;
+
+  reward: {
+    intimacy_points: number;
+    badge_text: string;
+  };
+  safety: {
+    mode: "normal" | "alert";
+    alert: string;
+  };
+  tts_script: string;
+};
+
+type RecordItem = {
+  id: string;
+  createdAt: string;
+  draft: DraftState;
+  result: MediationResult;
+  meta: {
+    source: Source;
+    issueTag: string;
+  };
+  selectedRepairIndex: number;
+  completedRepairIndex: number | null;
+};
+
+type LegacyRecordItem = Omit<RecordItem, "selectedRepairIndex" | "completedRepairIndex"> & {
+  taskDone?: boolean;
+  selectedRepairIndex?: number;
+  completedRepairIndex?: number | null;
+};
+
+type ToastState = {
+  message: string;
+  tone: "dark" | "pink" | "amber";
+};
+
+type GeminiResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+  }>;
+  promptFeedback?: {
+    blockReason?: string;
+  };
+};
+
+type AgeMeta = {
+  label: string;
+  audienceName: string;
+  languageStyle: string;
+  metaphorType: string;
+  childWordLimit: string;
+};
+
+const STORAGE_KEYS = {
+  settings: "pet-judge-settings-v2",
+  draft: "pet-judge-draft-v2",
+  records: "pet-judge-records-v2",
+} as const;
+
+const PETS = {
+  cat: {
+    emoji: "🐱",
+    firstPerson: "本喵",
+    accent: "from-fuchsia-400 via-pink-400 to-rose-400",
+    soft: "from-fuchsia-50 via-white to-rose-50",
+    chip: "bg-fuchsia-100 text-fuchsia-700",
+    writingToolEmoji: "🎣",
+    writingToolLabel: "逗猫棒",
+    openers: [
+      "本喵先把小爪垫放轻一点，认真听你们说。",
+      "本喵在这儿，谁的心里话都可以慢慢说。",
+      "本喵先把空气里的刺刺话拨开一点。",
+    ],
+    closings: [
+      "本喵宣布：今天这个家还是暖暖的。",
+      "本喵的小爪印已经盖好啦，和好继续。",
+      "本喵确认过了，你们是在学着更会说话。",
+    ],
+  },
+  dog: {
+    emoji: "🐶",
+    firstPerson: "本汪",
+    accent: "from-amber-400 via-orange-400 to-yellow-400",
+    soft: "from-amber-50 via-white to-orange-50",
+    chip: "bg-amber-100 text-amber-700",
+    writingToolEmoji: "🦴",
+    writingToolLabel: "小骨头",
+    openers: [
+      "本汪先坐好，认真听你们把话说完。",
+      "本汪会先把着急的话接住，再慢慢理顺。",
+      "本汪先把这阵小风波按住，不让它继续乱跑。",
+    ],
+    closings: [
+      "本汪宣布：今天和解赢啦。",
+      "本汪摇尾巴认证：你们已经更靠近了。",
+      "本汪的小爪印说：这次不是对抗，是合作。",
+    ],
+  },
+  rabbit: {
+    emoji: "🐰",
+    firstPerson: "小兔",
+    accent: "from-sky-400 via-cyan-400 to-emerald-400",
+    soft: "from-sky-50 via-white to-emerald-50",
+    chip: "bg-cyan-100 text-cyan-700",
+    writingToolEmoji: "🥕",
+    writingToolLabel: "小胡萝卜",
+    openers: [
+      "小兔先把耳朵竖起来，安安静静听你们说。",
+      "小兔会把每一句话都轻轻接住。",
+      "小兔先陪你们把乱乱的心情放平一点。",
+    ],
+    closings: [
+      "小兔轻轻盖章：今天继续暖暖的。",
+      "小兔宣布：现在适合做一个小小和解动作。",
+      "小兔确认：你们已经往和好那边走啦。",
+    ],
+  },
+} satisfies Record<PetType, {
+  emoji: string;
+  firstPerson: string;
+  accent: string;
+  soft: string;
+  chip: string;
+  writingToolEmoji: string;
+  writingToolLabel: string;
+  openers: string[];
+  closings: string[];
+}>;
+
+const AGE_META: Record<AgeGroup, AgeMeta> = {
+  "3_5": {
+    label: "3-5岁",
+    audienceName: "小宝宝",
+    languageStyle: "极短、安抚、家长引导为主",
+    metaphorType: "动物、玩具、糖果",
+    childWordLimit: "40~80字",
+  },
+  "6_8": {
+    label: "6-8岁",
+    audienceName: "小朋友",
+    languageStyle: "短句、具体动作、一次一个成长点",
+    metaphorType: "游戏、学校、冒险",
+    childWordLimit: "60~120字",
+  },
+  "9_12": {
+    label: "9-12岁",
+    audienceName: "小主人",
+    languageStyle: "能讲简单因果，保留宠物感",
+    metaphorType: "运动、探险、成长",
+    childWordLimit: "80~160字",
+  },
+  "13_15": {
+    label: "13-15岁",
+    audienceName: "大朋友",
+    languageStyle: "更尊重、更平等、不过度幼化",
+    metaphorType: "选择、边界、信任",
+    childWordLimit: "100~180字",
+  },
+};
+
+const EMOTION_OPTIONS: Emotion[] = ["生气", "委屈", "难过", "不服气", "担心", "平静"];
+
+const DEFAULT_PROMPT = `你是一个儿童教育专家，也是帮助家庭把问题说清楚、解决得更顺的沟通能手。
+现在你要扮演家庭宠物调解官，名字由外部传入，例如“雪雪”。
+你不是冷酷裁判，而是温柔、可爱、值得信任的家庭宠物大法官。
+
+你的任务是在孩子和家长发生分歧时：
+1. 先理解双方情绪，整理双方诉求；
+2. 必须根据孩子和家长说的话（输入内容），判断孩子和家长各自最接近的情绪；
+3. 用宠物第一人称口吻，温柔安抚孩子；
+4. 结合孩子年龄、性别和表达方式，给出更容易被接受的解决办法；
+5. 同时给家长一个简短、可执行的沟通提醒；
+6. 促进关系修复，而不是判定输赢；
+7. 给出一个低阻力、可立刻执行的和解动作；
+8. 最后输出温馨结尾和亲密度奖励。
+
+你必须根据 child_profile 中的信息调整表达方式：
+- 如果 age 有值，则优先使用 age；
+- 如果 age 为空且提供 birthday，则根据 birthday 推断年龄；
+- 如果 age 和 birthday 都没有，则按 10 岁理解；
+- 根据年龄自动适配语言风格；
+- 可以参考孩子性别来调整语气和举例，但绝不能使用刻板印象或标签化表达。
+
+年龄表达规则：
+- 3_5：孩子版文案极短，少说教，主要安抚和行动建议，更偏向家长引导。
+- 6_8：句子短、具体、温柔，一次只讲一个成长点，避免抽象词。
+- 9_12：可加入简单因果解释，但仍保持宠物感和温和语气。
+- 13_15：减少幼态表达，避免过度可爱化，更强调尊重、自主和协商。
+
+输出原则：
+- 不羞辱、不标签化、不绝对站队。
+- 不说“你就是错的”“你太差了”“你总是这样”等否定性表达。
+- 不把家长塑造成反派，也不让孩子感觉被审判。
+- 重点不是输赢，而是让孩子被理解、让家长有方法、让关系变温暖。
+- 优先给出低阻力和解动作，如：说一句话、定一个小计划、击掌、握手。
+- 不要一上来就要求拥抱，除非上下文显示双方已经明显缓和。
+- child_view 必须使用宠物第一人称口吻。
+- parent_view 可以更理性，但仍须温和，不得说教过重。
+- child_view 总字数应尽量简洁：
+  - 3_5：40~80字
+  - 6_8：60~120字
+  - 9_12：80~160字
+  - 13_15：100~180字
+
+情绪选择规则：
+emotion_summary.child 和 emotion_summary.parent 只能从以下词中选择一个：
+生气、委屈、难过、不服气、担心、平静
+（必须严格依据输入的两段对话内容进行推理分析）
+
+安全规则：
+如果发现涉及以下内容：
+- 自残
+- 虐待
+- 严重人身伤害
+- 长期恐吓
+- 明显家庭暴力
+则不要继续使用轻松宠物判案风格，切换到 safety.mode = "alert"，
+重点给出安全建议、可信成年人求助建议和停止冲突升级的建议。
+
+输出必须是 JSON，不得输出 JSON 以外的任何说明文字。`;
+
+const DAD_PROMPT = `你是一个儿童教育专家，同时也是一位深爱女儿的爸爸，
+擅长在家庭冲突中用温暖、智慧的方式化解矛盾，修复关系。
+
+你现在扮演"爸爸调解官"，名字就叫"爸爸"，永远不要叫妈妈"老婆"，只能叫"妈妈"或"孩子妈妈"。
+
+你不是法官，也不是裁判，
+而是那个最了解女儿、也最理解妈妈的人。
+你调解的是：女儿和妈妈之间发生的分歧。
+
+---
+
+【你的任务】
+
+1. 分析冲突核心，整理母女双方的真实诉求（表面诉求 vs 深层需求）；
+2. 必须根据女儿和妈妈说的话（输入的对话内容），分析并判断女儿和妈妈各自最接近的情绪；
+3. 用爸爸第一人称口吻，温柔且有力量地安抚女儿，
+   让她感到被理解、被看见、有支撑；
+4. 用爸爸对妈妈说话的口吻，温和但直接地帮助妈妈
+   看见女儿被忽视的感受，同时肯定妈妈的出发点；
+5. 给出可当场使用的沟通桥梁脚本：
+   - 爸爸可以当场说的3句话；
+   - 女儿可以照着说的2句话；
+   - 妈妈可以照着说的2句话；
+6. 提供两个解决方案选项供家庭选择；
+7. 制定一个最小可执行微协议（今天怎么做、遇到冲突的暗号、破坏了怎么补救）；
+8. 给出一个低阻力、可立刻执行的和解动作（1分钟内完成）；
+9. 输出温馨结尾和亲密度奖励。由于爸爸目前不在孩子身边（异地/出差等），【所有的亲密度奖励】（intimacy_reward）绝对不能包含“爸爸今晚陪你读绘本”、“周末爸爸带你看电影”、“一家人一起”等需要爸爸肉身在场的活动。奖励必须是远程互动（如专属视频通话手势、发一个专属表情包）或由妈妈代为执行的小特权、精神鼓励。
+
+---
+
+【表达原则】
+
+- 爸爸对女儿：温柔、有安全感、带着爱护，
+  让她觉得"爸爸懂我"，而不是"爸爸在评判我"；
+  可适当用"爸爸小时候也……"拉近距离；
+- 爸爸对妈妈：尊重、平等、温和而直接，
+  不否定妈妈，帮她看见女儿视角中被遮住的部分；
+- 不羞辱、不标签化、不绝对站队；
+- 不说"你就是错的""你总是这样"等否定性表达；
+- 不把妈妈塑造成反派，也不让女儿感到被审判；
+- 优先给低阻力和解动作（一句话/击掌/一件小事），
+  不要一上来就要求拥抱，除非双方情绪已明显缓和。
+
+---
+
+【年龄适配】
+
+- 可加入简单因果解释，让女儿感受到爸爸认真在讲道理；
+- 语言具体、不抽象，避免空洞大道理；
+- 保持温和、平等的父女对话语气；
+- 尊重女儿的自我感受，不以大压小。
+
+---
+
+【字数要求】
+
+| 字段 | 字数范围 |
+|---|---|
+| dad_to_daughter | 150～250字 |
+| dad_to_mom | 120～200字 |
+| bridge_script 每句话 | 20～50字 |
+| solution_plan 每条步骤 | 15～40字 |
+| micro_agreement 每项 | 20～60字 |
+| repair_action.do_now | 20～50字 |
+| closing.message | 60～100字 |
+
+---
+
+【情绪选择规则】
+
+emotion_summary.daughter 和 emotion_summary.mother
+只能从以下6个词中选择一个：
+生气、委屈、难过、不服气、担心、平静
+（必须严格依据输入的两段对话内容进行推理分析，绝不可随机挑选）
+
+---
+
+【安全规则】
+
+如果发现涉及以下任一内容：
+- 自残 / 虐待 / 严重人身伤害
+- 长期恐吓 / 明显家庭暴力
+
+立即切换 safety.mode = "alert"，
+停止使用温馨调解风格，
+在 alert_message 中给出：
+① 停止冲突升级的建议
+② 寻找可信成年人或专业机构的建议
+③ 简短的安全提示
+
+---
+
+【输出规则】
+
+输出必须是合法 JSON，不得输出任何 JSON 以外的文字。`;
+
+const DEFAULT_SETTINGS: SettingsState = {
+  petName: "雪雪",
+  petType: "cat",
+  petAvatar: "",
+  childName: "乐乐",
+  childBirthday: "",
+  fallbackAge: 10,
+  ageManualOverride: false,
+  childGender: "girl",
+  caregiverOptions: ["妈妈", "爸爸", "姥姥", "姥爷", "爷爷", "奶奶"],
+  commonCaregiverOptions: ["妈妈", "爸爸"],
+  systemPrompt: DEFAULT_PROMPT,
+  apiKey: "12345",
+  apiEndpoint: "https://wpu.dpdns.org",
+  modelName: "gemini-3.1-flash-lite-preview",
+};
+
+const DEFAULT_DRAFT: DraftState = {
+  caregiver: "妈妈",
+  childStatement: "先玩再写作业",
+  parentStatement: "先写作业再玩",
+};
+
+const MEDIATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "pet",
+    "child_profile",
+    "emotion_summary",
+    "child_view",
+    "action_card",
+    "parent_view",
+    "reward",
+    "safety",
+    "tts_script",
+  ],
+  properties: {
+    pet: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "type", "title"],
+      properties: {
+        name: { type: "string" },
+        type: { type: "string", enum: ["cat", "dog", "rabbit"] },
+        title: { type: "string" },
+      },
+    },
+    child_profile: {
+      type: "object",
+      additionalProperties: false,
+      required: ["nickname", "age", "age_group", "birthday"],
+      properties: {
+        nickname: { type: "string" },
+        age: { type: "integer", minimum: 3, maximum: 15 },
+        age_group: { type: "string", enum: ["3_5", "6_8", "9_12", "13_15"] },
+        birthday: { type: "string" },
+      },
+    },
+    emotion_summary: {
+      type: "object",
+      additionalProperties: false,
+      required: ["child", "parent"],
+      properties: {
+        child: { type: "string", enum: EMOTION_OPTIONS },
+        parent: { type: "string", enum: EMOTION_OPTIONS },
+      },
+    },
+    child_view: {
+      type: "object",
+      additionalProperties: false,
+      required: ["opening", "observation", "judgment_short", "action_short", "closing"],
+      properties: {
+        opening: { type: "string" },
+        observation: { type: "string" },
+        judgment_short: { type: "string" },
+        action_short: { type: "string" },
+        closing: { type: "string" },
+      },
+    },
+    action_card: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "do_now", "child_can_say", "parent_can_say", "repair_action"],
+      properties: {
+        title: { type: "string" },
+        do_now: { type: "string" },
+        child_can_say: { type: "string" },
+        parent_can_say: { type: "string" },
+        repair_action: { type: "string" },
+      },
+    },
+    parent_view: {
+      type: "object",
+      additionalProperties: false,
+      required: ["issue_summary", "fair_judgment", "child_learning", "parent_guidance"],
+      properties: {
+        issue_summary: { type: "string" },
+        fair_judgment: { type: "string" },
+        child_learning: { type: "string" },
+        parent_guidance: { type: "string" },
+      },
+    },
+    reward: {
+      type: "object",
+      additionalProperties: false,
+      required: ["intimacy_points", "badge_text"],
+      properties: {
+        intimacy_points: { type: "integer", minimum: 0, maximum: 5 },
+        badge_text: { type: "string" },
+      },
+    },
+    safety: {
+      type: "object",
+      additionalProperties: false,
+      required: ["mode", "alert"],
+      properties: {
+        mode: { type: "string", enum: ["normal", "alert"] },
+        alert: { type: "string" },
+      },
+    },
+    tts_script: { type: "string" },
+  },
+} as const;
+
+const DAD_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "mediator_name",
+    "safety",
+    "case_analysis",
+    "emotion_summary",
+    "dad_to_daughter",
+    "dad_to_mom",
+    "bridge_script",
+    "solution_plan",
+    "micro_agreement",
+    "repair_action",
+    "closing"
+  ],
+  properties: {
+    mediator_name: { type: "string" },
+    safety: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["normal", "alert"] },
+        alert_message: { type: "string" }
+      }
+    },
+    case_analysis: {
+      type: "object",
+      properties: {
+        core_conflict: { type: "string" },
+        daughter_needs: { type: "array", items: { type: "string" } },
+        mother_needs: { type: "array", items: { type: "string" } }
+      }
+    },
+    emotion_summary: {
+      type: "object",
+      properties: {
+        daughter: { type: "string", enum: EMOTION_OPTIONS },
+        mother: { type: "string", enum: EMOTION_OPTIONS }
+      }
+    },
+    dad_to_daughter: { type: "string" },
+    dad_to_mom: { type: "string" },
+    bridge_script: {
+      type: "object",
+      properties: {
+        dad_says_now: { type: "array", items: { type: "string" } },
+        daughter_can_say: { type: "array", items: { type: "string" } },
+        mom_can_say: { type: "array", items: { type: "string" } }
+      }
+    },
+    solution_plan: {
+      type: "object",
+      properties: {
+        option_A: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            steps: { type: "array", items: { type: "string" } }
+          }
+        },
+        option_B: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            steps: { type: "array", items: { type: "string" } }
+          }
+        }
+      }
+    },
+    micro_agreement: {
+      type: "object",
+      properties: {
+        today_rule: { type: "string" },
+        next_time_signal: { type: "string" },
+        repair_if_broken: { type: "string" }
+      }
+    },
+    repair_action: {
+      type: "object",
+      properties: {
+        do_now: { type: "string" },
+        time_needed_minutes: { type: "integer" }
+      }
+    },
+    closing: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        intimacy_reward: { type: "string" }
+      }
+    }
+  }
+} as const;
+
+function readStorage<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  const raw = window.localStorage.getItem(key);
+  if (!raw) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStorage<T>(key: string, value: T) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function collapseText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function shortenText(text: string, maxLength = 26) {
+  const compact = collapseText(text);
+  if (!compact) {
+    return "";
+  }
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
+}
+
+function createId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function clampAge(age: number) {
+  return Math.min(15, Math.max(3, Math.round(age || 10)));
+}
+
+function normalizeBirthdayInput(value: string) {
+  const compact = value.replace(/\s+/g, "").replace(/[年月日.\/]/g, "");
+  if (/^\d{8}$/.test(compact)) {
+    return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
+  }
+  if (/^\d{6}$/.test(compact)) {
+    return `${compact.slice(0, 4)}-${compact.slice(4, 6)}`;
+  }
+  if (/^\d{4}$/.test(compact)) {
+    return compact;
+  }
+  return value
+    .replace(/[.\/]/g, "-")
+    .replace(/年/g, "-")
+    .replace(/月/g, "-")
+    .replace(/日/g, "")
+    .replace(/\s+/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function calculateAgeFromBirthday(birthday: string) {
+  const normalized = normalizeBirthdayInput(birthday);
+  if (!normalized) return null;
+  const match = normalized.match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/);
+  if (!match) return null;
+
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = monthText ? Number(monthText) : null;
+  const day = dayText ? Number(dayText) : null;
+  const now = new Date();
+
+  if (!Number.isInteger(year) || year < 1900 || year > now.getFullYear()) return null;
+  if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) return null;
+  if (day !== null) {
+    if (month === null) return null;
+    const daysInMonth = new Date(year, month, 0).getDate();
+    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) return null;
+  }
+
+  let age = now.getFullYear() - year;
+  const currentMonth = now.getMonth() + 1;
+  const currentDay = now.getDate();
+
+  if (month !== null) {
+    if (currentMonth < month) {
+      age -= 1;
+    } else if (currentMonth === month && day !== null && currentDay < day) {
+      age -= 1;
+    }
+  }
+
+  return age >= 0 ? age : null;
+}
+
+function getAgeGroup(age: number): AgeGroup {
+  if (age <= 5) return "3_5";
+  if (age <= 8) return "6_8";
+  if (age <= 12) return "9_12";
+  return "13_15";
+}
+
+function resolveChildProfile(settings: SettingsState): ChildProfile {
+  const birthdayAge = calculateAgeFromBirthday(settings.childBirthday);
+  const shouldUseManualAge = settings.ageManualOverride || birthdayAge === null;
+  const age = clampAge(shouldUseManualAge ? settings.fallbackAge : birthdayAge ?? DEFAULT_SETTINGS.fallbackAge);
+
+  return {
+    nickname: collapseText(settings.childName) || DEFAULT_SETTINGS.childName,
+    birthday: settings.childBirthday,
+    age,
+    age_group: getAgeGroup(age),
+    gender: settings.childGender,
+    source: shouldUseManualAge ? "fallback" : "birthday",
+  };
+}
+
+function pickRandom<T>(items: T[]) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function normalizeChildGender(value: unknown): ChildGender {
+  return value === "boy" || value === "girl" ? value : "girl";
+}
+
+function normalizeCommonCaregivers(options: string[], favorites: unknown) {
+  const favoriteList = Array.isArray(favorites)
+    ? favorites.filter((item): item is string => typeof item === "string").map((item) => collapseText(item))
+    : [];
+
+  const cleaned = favoriteList.filter((item, index) => item && options.includes(item) && favoriteList.indexOf(item) === index).slice(0, 2);
+
+  if (cleaned.length === 2) {
+    return cleaned;
+  }
+
+  const fallback = options.slice(0, 2);
+  return cleaned.length > 0 ? Array.from(new Set([...cleaned, ...fallback])).slice(0, 2) : fallback;
+}
+
+function getCommonCaregivers(settings: SettingsState) {
+  const normalized = normalizeCommonCaregivers(settings.caregiverOptions, settings.commonCaregiverOptions);
+  return normalized.length > 0 ? normalized : DEFAULT_SETTINGS.commonCaregiverOptions;
+}
+
+function inferEmotion(text: string, role: "child" | "parent"): Emotion {
+  const source = collapseText(text);
+  if (!source) return role === "parent" ? "担心" : "平静";
+
+  if (/(气死|生气|火大|烦死|讨厌|别管|不要烦|吼|大喊)/.test(source)) return "生气";
+  if (/(委屈|不理解|冤枉|偏心|根本不懂|都不听我|老说我)/.test(source)) return "委屈";
+  if (/(难过|伤心|想哭|哭了|失望|心里难受)/.test(source)) return "难过";
+  if (/(凭什么|不服|才不要|不想听|就是不|不公平)/.test(source)) return "不服气";
+  if (/(担心|怕|来不及|拖太晚|影响|跟不上|不好|出事|完不成)/.test(source)) return "担心";
+  if (role === "parent" && /(先|必须|应该|赶紧|马上|立刻)/.test(source)) return "担心";
+  if (role === "child" && /(想|可不可以|能不能|我想先)/.test(source)) return "委屈";
+
+  return "平静";
+}
+
+function inferIssueTag(childStatement: string, parentStatement: string) {
+  const fullText = `${childStatement} ${parentStatement}`;
+  if (/作业|写作业|练琴|学习|复习|考试/.test(fullText)) return "作业安排";
+  if (/手机|平板|电视|动画|游戏|刷视频/.test(fullText)) return "屏幕时间";
+  if (/睡觉|起床|晚睡|午睡/.test(fullText)) return "作息安排";
+  if (/收拾|整理|房间|玩具|书包|袜子/.test(fullText)) return "收拾整理";
+  if (/吃饭|零食|甜|冰淇淋|饭/.test(fullText)) return "吃饭习惯";
+  if (/出门|回来|时间|约定|守时/.test(fullText)) return "时间约定";
+  if (/弟弟|妹妹|哥哥|姐姐|抢/.test(fullText)) return "手足冲突";
+  return "表达方式";
+}
+
+function detectSafetyRisk(childStatement: string, parentStatement: string) {
+  const fullText = `${childStatement} ${parentStatement}`;
+  const patterns = [
+    /自残|不想活|想死|割腕|跳楼|轻生/,
+    /家暴|打我|打他|打她|殴打|虐待|掐|踢|扇巴掌|拿东西砸/,
+    /威胁|恐吓|拿刀|拿棍|报警抓你|离家出走/,
+    /长期辱骂|天天骂|滚出去|不要你了|恨你/,
+  ];
+  return patterns.some((pattern) => pattern.test(fullText));
+}
+
+function buildHomeOpener(settings: SettingsState, caregiver: string) {
+  const pet = PETS[settings.petType];
+  const lines = [
+    `${pickRandom(pet.openers)}`,
+    `${settings.petName}想先听清${settings.childName}和${caregiver}心里最在意的那一句。`,
+    `${settings.petName}会先把话里的小刺轻轻放下，再陪你们想一个更顺的办法。`,
+  ];
+  return pickRandom(lines);
+}
+
+function buildLoadingLine(settings: SettingsState, draft: DraftState, isDadMode: boolean) {
+  const pet = PETS[settings.petType];
+  const childEmotion = inferEmotion(draft.childStatement, "child");
+  const parentEmotion = inferEmotion(draft.parentStatement, "parent");
+  const issueTag = inferIssueTag(draft.childStatement, draft.parentStatement);
+  const childSnippet = shortenText(draft.childStatement, 10) || "孩子的话";
+  const parentSnippet = shortenText(draft.parentStatement, 10) || "家长的话";
+
+  if (isDadMode) {
+    const dadLines = [
+      `爸爸正在整理“${childSnippet}”和“${parentSnippet}”...`,
+      `爸爸在帮你们理清这次的“${issueTag}”小风波，准备给出更柔和的方案。`,
+      `爸爸能理解女儿的${childEmotion}，也能体会妈妈的${parentEmotion}，正在想怎么能让你们更顺畅地沟通。`
+    ];
+    return pickRandom(dadLines);
+  }
+
+  const lines = [
+    `${settings.petName}正在把“${childSnippet}”和“${parentSnippet}”轻轻排好，准备写下更合适的办法。`,
+    `${pet.firstPerson}正在顺着孩子的${childEmotion}和${draft.caregiver}的${parentEmotion}，找一个更容易说出口的办法。`,
+    `${settings.petName}正在理清这次“${issueTag}”的小风波，准备给出更温和的判词。`,
+  ];
+  return pickRandom(lines);
+}
+
+function buildSystemInstruction(settings: SettingsState, profile: ChildProfile, caregiver: string) {
+  const pet = PETS[settings.petType];
+  const ageMeta = AGE_META[profile.age_group];
+
+  return `${settings.systemPrompt}
+
+当前家庭设定：
+- 宠物名字：${settings.petName}
+- 宠物类型：${settings.petType}
+- 宠物第一人称：${pet.firstPerson}
+- 宠物头衔：大法官
+- 孩子名字：${profile.nickname}
+- 孩子年龄：${profile.age}
+- 年龄段：${profile.age_group}
+- 年龄段标签：${ageMeta.label}
+- 年龄段称呼：${ageMeta.audienceName}
+- 语言风格：${ageMeta.languageStyle}
+- 比喻类型：${ageMeta.metaphorType}
+- 孩子性别：${profile.gender}
+- 家长称呼：${caregiver}
+- 前台常用家长称呼：${getCommonCaregivers(settings).join("、")}
+- 亲密度奖励只奖励愿意表达、愿意倾听、愿意和解，不奖励“赢了对方”。`;
+}
+
+function buildUserPrompt(settings: SettingsState, draft: DraftState, profile: ChildProfile) {
+  return JSON.stringify(
+    {
+      pet: {
+        name: settings.petName,
+        type: settings.petType,
+        title: "大法官",
+      },
+      child_profile: {
+        nickname: profile.nickname,
+        birthday: profile.birthday,
+        age: profile.age,
+        age_group: profile.age_group,
+        gender: profile.gender,
+      },
+      scene: {
+        child_statement: draft.childStatement,
+        parent_statement: draft.parentStatement,
+        caregiver: draft.caregiver,
+      },
+      output_requirements: {
+        need_child_view: true,
+        need_parent_view: true,
+        need_tts_script: true,
+        intimacy_points_range: [1, 5],
+        child_first: true,
+        infer_emotions_from_statements: true,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function safeString(value: unknown, fallback: string) {
+  return typeof value === "string" && collapseText(value) ? collapseText(value) : fallback;
+}
+
+function safeEmotion(value: unknown, fallback: Emotion): Emotion {
+  return typeof value === "string" && EMOTION_OPTIONS.includes(value as Emotion) ? (value as Emotion) : fallback;
+}
+
+function safeAgeGroup(value: unknown, fallback: AgeGroup): AgeGroup {
+  return value === "3_5" || value === "6_8" || value === "9_12" || value === "13_15" ? value : fallback;
+}
+
+function safePetType(value: unknown, fallback: PetType): PetType {
+  return value === "cat" || value === "dog" || value === "rabbit" ? value : fallback;
+}
+
+function buildDemoCopy(settings: SettingsState, draft: DraftState, profile: ChildProfile): MediationResult {
+  const pet = PETS[settings.petType];
+  const childEmotion = inferEmotion(draft.childStatement, "child");
+  const parentEmotion = inferEmotion(draft.parentStatement, "parent");
+  const issueTag = inferIssueTag(draft.childStatement, draft.parentStatement);
+
+  const childLearningMap: Record<AgeGroup, string> = {
+    "3_5": "先把心里话短短说出来，比哭闹更容易被听见。",
+    "6_8": "先说感受，再说一个小办法，会更容易被理解。",
+    "9_12": "先表达需求，再提出方案，比直接顶回去更成熟。",
+    "13_15": "把真实需求和愿意承担的部分一起说清楚，更容易被尊重。",
+  };
+
+  const parentGuidanceMap: Record<AgeGroup, string> = {
+    "3_5": "先安抚，再给很简单的选择，比直接命令更容易合作。",
+    "6_8": "先接住情绪，再讲规则，会更容易被听进去。",
+    "9_12": "先说担心，再给可协商的安排，会比硬压更有效。",
+    "13_15": "尊重孩子的表达权，同时把边界说清楚，更容易形成真正合作。",
+  };
+
+  const doNowMap: Record<AgeGroup, string> = {
+    "3_5": `先一起定一个“5分钟准备 + 5分钟开始”的小计划。`,
+    "6_8": `一起定一个“20分钟任务 + 15分钟放松”的小时间表。`,
+    "9_12": `先确认今天必须完成的部分，再一起决定休息和完成顺序。`,
+    "13_15": `先把双方最在意的点各说一句，再写下一个都能接受的安排。`,
+  };
+
+  const childCanSayMap: Record<AgeGroup, string> = {
+    "3_5": "我想先休息一下，然后我会开始。",
+    "6_8": "我想先缓一下，但我愿意先做一部分。",
+    "9_12": "我不是不做，我想先说清楚我想怎么安排。",
+    "13_15": "我想先表达我的需求，也愿意一起商量可执行的方案。",
+  };
+
+  const parentCanSayMap: Record<AgeGroup, string> = {
+    "3_5": `我知道你现在有点难，我陪你一起开始。`,
+    "6_8": `我知道你想放松，我们一起定个让我放心的安排。`,
+    "9_12": `我听见你想先缓一缓，我们一起把时间说清楚。`,
+    "13_15": `我尊重你的想法，我们来商量一个兼顾规则和空间的方案。`,
+  };
+
+  const repairActionMap: Record<AgeGroup, string> = {
+    "3_5": `一起说“我听见你啦”，然后轻轻碰一下手。`,
+    "6_8": `互相说一句“我听见你的想法了”，再击掌一次。`,
+    "9_12": `轮流复述一次对方最在意的点，再一起确认今天的安排。`,
+    "13_15": `先各自说一句“我理解你在意什么”，再把协商结果定下来。`,
+  };
+
+  const childObservationMap: Record<AgeGroup, string> = {
+    "3_5": `${pet.firstPerson}看到啦，你想按自己的节奏来，${draft.caregiver}是在担心事情拖太晚。`,
+    "6_8": `${pet.firstPerson}看见你是真的有自己的想法，${draft.caregiver}也是真的在担心后面不好收尾。`,
+    "9_12": `${pet.firstPerson}听见的不是谁故意找麻烦，而是你们对先后顺序和说话方式没有商量好。`,
+    "13_15": `${pet.firstPerson}听见的是：你想争取自己的空间，${draft.caregiver}想守住今天该完成的安排。`,
+  };
+
+  const judgmentMap: Record<AgeGroup, string> = {
+    "3_5": `这次不是谁坏了，是你们还没找到最顺的小办法。`,
+    "6_8": `这次不是谁输谁赢，是“先做什么”还没有商量到一起。`,
+    "9_12": `双方目标其实都是想把今天过好，只是顺序和表达方式没有对齐。`,
+    "13_15": `核心不是对错，而是规则、需求和表达方式暂时撞在一起了。`,
+  };
+
+  const actionShortMap: Record<AgeGroup, string> = {
+    "3_5": `我们先做一个很小很小的开始，好吗？`,
+    "6_8": `我们先定个小时间表，再继续。`,
+    "9_12": `我们先把今天能做到的方案定清楚。`,
+    "13_15": `我们先把可接受的安排说具体一点。`,
+  };
+
+  const closingMap: Record<AgeGroup, string> = {
+    "3_5": `${pet.firstPerson}陪着你们慢慢来，今天也可以重新变暖。`,
+    "6_8": `${pet.firstPerson}相信你们可以把今天变得更顺一点。`,
+    "9_12": `${pet.firstPerson}觉得这次可以变成一次更会沟通的小练习。`,
+    "13_15": `${pet.firstPerson}相信你们能用更尊重彼此的方式把这件事走完。`,
+  };
+
+  const childOpening = `${pet.firstPerson}看到啦，你现在有点${childEmotion}，${draft.caregiver}有点${parentEmotion}。`;
+  const fairJudgment =
+    issueTag === "作业安排"
+      ? `${profile.nickname}想先放松一下可以理解，${draft.caregiver}担心任务拖晚了也合理。问题不是谁坏，而是顺序和表达方式没商量好。`
+      : `${profile.nickname}的感受是真的，${draft.caregiver}的担心也是真的。问题更多出在表达方式和节奏没有先对齐。`;
+
+  return {
+    pet: {
+      name: settings.petName,
+      type: settings.petType,
+      title: "大法官",
+    },
+    child_profile: {
+      nickname: profile.nickname,
+      age: profile.age,
+      age_group: profile.age_group,
+      birthday: profile.birthday,
+    },
+    emotion_summary: {
+      child: childEmotion,
+      parent: parentEmotion,
+    },
+    child_view: {
+      opening: childOpening,
+      observation: childObservationMap[profile.age_group],
+      judgment_short: judgmentMap[profile.age_group],
+      action_short: actionShortMap[profile.age_group],
+      closing: closingMap[profile.age_group],
+    },
+    action_card: {
+      title: `${settings.petName}现在的小任务`,
+      do_now: doNowMap[profile.age_group],
+      child_can_say: childCanSayMap[profile.age_group],
+      parent_can_say: parentCanSayMap[profile.age_group],
+      repair_action: repairActionMap[profile.age_group],
+    },
+    parent_view: {
+      issue_summary: `这次主要是在“${issueTag}”上出现分歧：${profile.nickname}希望“${shortenText(draft.childStatement, 20) || "按自己的节奏来"}”，${draft.caregiver}更在意“${shortenText(draft.parentStatement, 20) || "先把安排稳定下来"}”。`,
+      fair_judgment: fairJudgment,
+      child_learning: childLearningMap[profile.age_group],
+      parent_guidance: parentGuidanceMap[profile.age_group],
+    },
+    reward: {
+      intimacy_points: 3,
+      badge_text: `${settings.petName}的和谐小爪印`,
+    },
+    safety: {
+      mode: "normal",
+      alert: "",
+    },
+    tts_script: `${childOpening}${childObservationMap[profile.age_group]}${judgmentMap[profile.age_group]}${actionShortMap[profile.age_group]}${pickRandom(pet.closings)}`,
+  };
+}
+
+function buildSafetyResult(settings: SettingsState, draft: DraftState, profile: ChildProfile): MediationResult {
+  return {
+    pet: {
+      name: settings.petName,
+      type: settings.petType,
+      title: "安全提醒",
+    },
+    child_profile: {
+      nickname: profile.nickname,
+      age: profile.age,
+      age_group: profile.age_group,
+      birthday: profile.birthday,
+    },
+    emotion_summary: {
+      child: inferEmotion(draft.childStatement, "child"),
+      parent: inferEmotion(draft.parentStatement, "parent"),
+    },
+    child_view: {
+      opening: `${settings.petName}这次先不做萌萌的判词。`,
+      observation: `我听到的内容里，可能已经不只是普通拌嘴，而是涉及安全的事。`,
+      judgment_short: `现在最重要的不是争论输赢，而是先保证安全。`,
+      action_short: `请立刻暂停冲突，去找可信的大人或专业支持。`,
+      closing: `先保护好人，再谈怎么解决问题。`,
+    },
+    action_card: {
+      title: "现在先做安全步骤",
+      do_now: "先离开危险环境，暂停争执，确保没有人继续受到伤害。",
+      child_can_say: "我现在需要安全和帮助，请你马上找可信的大人来。",
+      parent_can_say: "我们先停下来，马上联系可信的大人或专业支持。",
+      repair_action: "联系可信亲友、老师、学校心理老师、社区支持或当地紧急求助渠道。",
+    },
+    parent_view: {
+      issue_summary: "当前内容可能涉及伤害、威胁、自残或长期恐吓，已经超出普通家庭调解范围。",
+      fair_judgment: "现在应优先处理安全风险，而不是继续争论谁对谁错。",
+      child_learning: "如果你害怕、受伤或不安全，第一步是马上告诉可信的大人。",
+      parent_guidance: "请立即停止任何可能造成伤害的行为，并尽快寻求现实支持。",
+    },
+    reward: {
+      intimacy_points: 0,
+      badge_text: "先处理安全，再谈和解",
+    },
+    safety: {
+      mode: "alert",
+      alert: "如果存在现实危险、身体伤害、自残或虐待风险，请尽快联系可信成年人、专业机构或当地紧急求助服务。",
+    },
+    tts_script: "现在最重要的不是判词，而是先保证安全。请立刻停止冲突，并联系可信的大人或专业支持。",
+  };
+}
+
+function normalizeResult(input: unknown, settings: SettingsState, draft: DraftState, profile: ChildProfile): MediationResult {
+  const fallback = buildDemoCopy(settings, draft, profile);
+  const root = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
+
+  const petRoot = typeof root.pet === "object" && root.pet !== null ? (root.pet as Record<string, unknown>) : {};
+  const childRoot = typeof root.child_profile === "object" && root.child_profile !== null ? (root.child_profile as Record<string, unknown>) : {};
+  const emotionRoot = typeof root.emotion_summary === "object" && root.emotion_summary !== null ? (root.emotion_summary as Record<string, unknown>) : {};
+  const childViewRoot = typeof root.child_view === "object" && root.child_view !== null ? (root.child_view as Record<string, unknown>) : {};
+  const actionRoot = typeof root.action_card === "object" && root.action_card !== null ? (root.action_card as Record<string, unknown>) : {};
+  const parentViewRoot = typeof root.parent_view === "object" && root.parent_view !== null ? (root.parent_view as Record<string, unknown>) : {};
+  const rewardRoot = typeof root.reward === "object" && root.reward !== null ? (root.reward as Record<string, unknown>) : {};
+  const safetyRoot = typeof root.safety === "object" && root.safety !== null ? (root.safety as Record<string, unknown>) : {};
+
+  const intimacy = typeof rewardRoot.intimacy_points === "number" ? rewardRoot.intimacy_points : fallback.reward.intimacy_points;
+
+  return {
+    pet: {
+      name: safeString(petRoot.name, fallback.pet.name),
+      type: safePetType(petRoot.type, fallback.pet.type),
+      title: safeString(petRoot.title, fallback.pet.title),
+    },
+    child_profile: {
+      nickname: safeString(childRoot.nickname, fallback.child_profile.nickname),
+      age: clampAge(typeof childRoot.age === "number" ? childRoot.age : fallback.child_profile.age),
+      age_group: safeAgeGroup(childRoot.age_group, fallback.child_profile.age_group),
+      birthday: typeof childRoot.birthday === "string" ? childRoot.birthday : fallback.child_profile.birthday,
+    },
+    emotion_summary: {
+      child: safeEmotion(emotionRoot.child, fallback.emotion_summary.child),
+      parent: safeEmotion(emotionRoot.parent, fallback.emotion_summary.parent),
+    },
+    child_view: {
+      opening: safeString(childViewRoot.opening, fallback.child_view.opening),
+      observation: safeString(childViewRoot.observation, fallback.child_view.observation),
+      judgment_short: safeString(childViewRoot.judgment_short, fallback.child_view.judgment_short),
+      action_short: safeString(childViewRoot.action_short, fallback.child_view.action_short),
+      closing: safeString(childViewRoot.closing, fallback.child_view.closing),
+    },
+    action_card: {
+      title: safeString(actionRoot.title, fallback.action_card.title),
+      do_now: safeString(actionRoot.do_now, fallback.action_card.do_now),
+      child_can_say: safeString(actionRoot.child_can_say, fallback.action_card.child_can_say),
+      parent_can_say: safeString(actionRoot.parent_can_say, fallback.action_card.parent_can_say),
+      repair_action: safeString(actionRoot.repair_action, fallback.action_card.repair_action),
+    },
+    parent_view: {
+      issue_summary: safeString(parentViewRoot.issue_summary, fallback.parent_view.issue_summary),
+      fair_judgment: safeString(parentViewRoot.fair_judgment, fallback.parent_view.fair_judgment),
+      child_learning: safeString(parentViewRoot.child_learning, fallback.parent_view.child_learning),
+      parent_guidance: safeString(parentViewRoot.parent_guidance, fallback.parent_view.parent_guidance),
+    },
+    reward: {
+      intimacy_points: Math.max(0, Math.min(5, Math.round(intimacy))),
+      badge_text: safeString(rewardRoot.badge_text, fallback.reward.badge_text),
+    },
+    safety: {
+      mode: safetyRoot.mode === "alert" ? "alert" : "normal",
+      alert: typeof safetyRoot.alert === "string" ? collapseText(safetyRoot.alert) : fallback.safety.alert,
+    },
+    tts_script: safeString(root.tts_script, fallback.tts_script),
+  };
+}
+
+async function requestGeminiResult(settings: SettingsState, draft: DraftState, profile: ChildProfile, isDadMode: boolean) {
+  let baseUrl = (settings.apiEndpoint || "https://generativelanguage.googleapis.com").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    baseUrl = `https://${baseUrl}`;
+  }
+
+  const model = (settings.modelName || "gemini-3.1-flash-lite-preview").trim();
+  const url = new URL(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`);
+
+
+  const reqBody = isDadMode
+    ? {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: `女儿说：${draft.childStatement}\n妈妈说：${draft.parentStatement}` }],
+        },
+      ],
+      systemInstruction: {
+        role: "system",
+        parts: [{ text: DAD_PROMPT }],
+      },
+      generationConfig: {
+        temperature: 1,
+        topP: 0.95,
+        maxOutputTokens: 1500,
+        responseMimeType: "application/json",
+        responseJsonSchema: DAD_SCHEMA,
+      },
+    }
+    : {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: buildUserPrompt(settings, draft, profile) }],
+        },
+      ],
+      systemInstruction: {
+        role: "system",
+        parts: [{ text: buildSystemInstruction(settings, profile, draft.caregiver) }],
+      },
+      generationConfig: {
+        temperature: 1,
+        topP: 0.95,
+        maxOutputTokens: 1200,
+        responseMimeType: "application/json",
+        responseJsonSchema: MEDIATION_SCHEMA,
+      },
+    };
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const isProxy = !baseUrl.includes("googleapis.com");
+  if (isProxy && settings.apiKey?.trim()) {
+    headers["Authorization"] = `Bearer ${settings.apiKey.trim()}`;
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(reqBody),
+  });
+
+  if (!response.ok) {
+    let errText = "";
+    try {
+      errText = await response.text();
+    } catch {
+      errText = "无法读取服务器的错误详情";
+    }
+    throw new Error(`[${response.status}] HTTP Error: ${errText}`);
+  }
+
+  const data = (await response.json()) as GeminiResponse;
+  if (data.promptFeedback?.blockReason) {
+    return buildSafetyResult(settings, draft, profile);
+  }
+
+  const text =
+    data.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text ?? "")
+      .join("")
+      .trim() ?? "";
+
+  if (!text) {
+    throw new Error("Gemini returned an empty response.");
+  }
+
+  const parsed = JSON.parse(text) as any;
+
+  if (isDadMode) {
+    return {
+      pet: { name: "爸爸", type: settings.petType, title: "爸爸大法官" },
+      child_profile: profile,
+      emotion_summary: {
+        child: safeEmotion(parsed.emotion_summary?.daughter, "平静"),
+        parent: safeEmotion(parsed.emotion_summary?.mother, "平静"),
+      },
+      child_view: { opening: "", observation: "", judgment_short: "", action_short: "", closing: "" },
+      action_card: { title: "", do_now: "", child_can_say: "", parent_can_say: "", repair_action: "" },
+      parent_view: { issue_summary: "", fair_judgment: "", child_learning: "", parent_guidance: "" },
+      reward: { intimacy_points: 15, badge_text: parsed.closing?.intimacy_reward || "爸爸的爱" },
+      safety: { mode: parsed.safety?.mode === "alert" ? "alert" : "normal", alert: parsed.safety?.alert_message || "" },
+      tts_script: `${parsed.dad_to_daughter} ${parsed.dad_to_mom} ${parsed.closing?.message || ""}`,
+      is_dad_mode: true,
+      dad_data: parsed,
+    } as MediationResult;
+  }
+
+  return normalizeResult(parsed, settings, draft, profile);
+}
+
+function Card({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("rounded-[28px] border border-white/70 bg-white/90 p-4 shadow-[0_18px_50px_rgba(15,23,42,0.10)] backdrop-blur", className)}>{children}</div>;
+}
+
+function IconButton({ icon, onClick, label }: { icon: string; onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-lg text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-white"
+    >
+      {icon}
+    </button>
+  );
+}
+
+function TinyStat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-2xl bg-slate-50 px-3 py-2 text-center">
+      <div className="text-[11px] text-slate-400">{label}</div>
+      <div className="mt-1 text-base font-semibold text-slate-900">{value}</div>
+    </div>
+  );
+}
+
+function normalizeStoredRecord(item: LegacyRecordItem): RecordItem {
+  const selectedRepairIndex = item.selectedRepairIndex === 1 ? 1 : 0;
+  const completedRepairIndex = item.completedRepairIndex === 0 || item.completedRepairIndex === 1 ? item.completedRepairIndex : item.taskDone ? 0 : null;
+
+  return {
+    ...item,
+    selectedRepairIndex,
+    completedRepairIndex,
+  };
+}
+
+function buildRepairPlans(result: MediationResult) {
+  if (result.is_dad_mode) return [];
+
+  const titles: Record<PetType, [string, string]> = {
+    cat: ["轻爪预备计划", "暖胡须和好计划"],
+    dog: ["摇尾巴预备计划", "并肩和好计划"],
+    rabbit: ["小耳朵预备计划", "蹦蹦和好计划"],
+  };
+
+  const [firstTitle, secondTitle] = titles[result.pet.type];
+
+  return [
+    {
+      title: `${result.pet.name}的${firstTitle}`,
+      description: result.action_card?.do_now || "",
+    },
+    {
+      title: `${result.pet.name}的${secondTitle}`,
+      description: result.action_card?.repair_action || "",
+    },
+  ];
+}
+
+export default function App() {
+  const [view, setView] = useState<View>("home");
+  const [settings, setSettings] = useState<SettingsState>(() => {
+    const stored = readStorage<Partial<SettingsState>>(STORAGE_KEYS.settings, {});
+    const caregiverOptions =
+      Array.isArray(stored.caregiverOptions) && stored.caregiverOptions.length > 0
+        ? stored.caregiverOptions.filter((item): item is string => typeof item === "string" && collapseText(item).length > 0)
+        : DEFAULT_SETTINGS.caregiverOptions;
+
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      childBirthday: typeof stored.childBirthday === "string" ? normalizeBirthdayInput(stored.childBirthday) : DEFAULT_SETTINGS.childBirthday,
+      fallbackAge: clampAge(Number(stored.fallbackAge) || DEFAULT_SETTINGS.fallbackAge),
+      ageManualOverride: typeof stored.ageManualOverride === "boolean" ? stored.ageManualOverride : DEFAULT_SETTINGS.ageManualOverride,
+      childGender: normalizeChildGender(stored.childGender),
+      caregiverOptions,
+      commonCaregiverOptions: normalizeCommonCaregivers(caregiverOptions, stored.commonCaregiverOptions),
+      apiKey: stored.apiKey ?? DEFAULT_SETTINGS.apiKey,
+      apiEndpoint: stored.apiEndpoint ?? DEFAULT_SETTINGS.apiEndpoint,
+      modelName: stored.modelName ?? DEFAULT_SETTINGS.modelName,
+    };
+  });
+  const [draft, setDraft] = useState<DraftState>(() => {
+    const stored = readStorage<Partial<DraftState>>(STORAGE_KEYS.draft, {});
+    return {
+      ...DEFAULT_DRAFT,
+      ...stored,
+    };
+  });
+  const [records, setRecords] = useState<RecordItem[]>(() => {
+    const stored = readStorage<LegacyRecordItem[]>(STORAGE_KEYS.records, []);
+    return Array.isArray(stored) ? stored.map(normalizeStoredRecord) : [];
+  });
+  const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
+  const [openingSeed, setOpeningSeed] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [loadingLine, setLoadingLine] = useState("");
+  const [typedLoadingLine, setTypedLoadingLine] = useState("");
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [visibleBubbles, setVisibleBubbles] = useState(0);
+  const [showParentNotes, setShowParentNotes] = useState(false);
+  const [ageInput, setAgeInput] = useState(() => String(clampAge(Number(settings.fallbackAge) || DEFAULT_SETTINGS.fallbackAge)));
+  const [isDadModeActive, setIsDadModeActive] = useState(false);
+  const revealTimersRef = useRef<number[]>([]);
+
+  const pet = PETS[settings.petType];
+  const commonCaregivers = useMemo(() => getCommonCaregivers(settings), [settings]);
+  const openingLine = useMemo(() => buildHomeOpener(settings, draft.caregiver), [openingSeed, settings, draft.caregiver]);
+
+  const activeRecord = useMemo(() => records.find((item) => item.id === activeRecordId) ?? null, [activeRecordId, records]);
+  const activeRepairPlans = useMemo(() => (activeRecord ? buildRepairPlans(activeRecord.result) : []), [activeRecord]);
+  const totalIntimacy = useMemo(() => records.reduce((sum, item) => sum + item.result.reward.intimacy_points, 0), [records]);
+  const totalMediations = records.length;
+  const latestIssue = records[0]?.meta.issueTag ?? "还没有记录";
+
+  const isDadModeTriggered = useMemo(() => {
+    return (
+      settings.petName === "雪雪" &&
+      settings.childName === "关关" &&
+      settings.childGender === "girl" &&
+      settings.petType === "cat"
+    );
+  }, [settings]);
+
+  useEffect(() => {
+    if (!isDadModeTriggered) {
+      setIsDadModeActive(false);
+    }
+  }, [isDadModeTriggered]);
+
+  useEffect(() => {
+    saveStorage(STORAGE_KEYS.settings, settings);
+  }, [settings]);
+
+  useEffect(() => {
+    setAgeInput(String(clampAge(Number(settings.fallbackAge) || DEFAULT_SETTINGS.fallbackAge)));
+  }, [settings.fallbackAge]);
+
+  useEffect(() => {
+    saveStorage(STORAGE_KEYS.draft, draft);
+  }, [draft]);
+
+  useEffect(() => {
+    saveStorage(STORAGE_KEYS.records, records);
+  }, [records]);
+
+  useEffect(() => {
+    if (!commonCaregivers.includes(draft.caregiver)) {
+      setDraft((previous) => ({
+        ...previous,
+        caregiver: commonCaregivers[0] ?? DEFAULT_DRAFT.caregiver,
+      }));
+    }
+  }, [commonCaregivers, draft.caregiver]);
+
+  useEffect(() => {
+    if (!toast) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setToast(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    if (view !== "result" || !activeRecord) {
+      return undefined;
+    }
+    revealTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    setVisibleBubbles(0);
+    revealTimersRef.current = Array.from({ length: 5 }, (_, index) =>
+      window.setTimeout(() => {
+        setVisibleBubbles(index + 1);
+      }, 120 + index * 180),
+    );
+    return () => {
+      revealTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [activeRecord, view]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isGenerating || !loadingLine) {
+      setTypedLoadingLine("");
+      return undefined;
+    }
+    setTypedLoadingLine("");
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index += 1;
+      setTypedLoadingLine(loadingLine.slice(0, index));
+      if (index >= loadingLine.length) {
+        window.clearInterval(timer);
+      }
+    }, 42);
+    return () => window.clearInterval(timer);
+  }, [isGenerating, loadingLine]);
+
+  const updateSetting = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => {
+    setSettings((previous) => ({
+      ...previous,
+      [key]: value,
+    }));
+  };
+
+  const updateDraft = <K extends keyof DraftState>(key: K, value: DraftState[K]) => {
+    setDraft((previous) => ({
+      ...previous,
+      [key]: value,
+    }));
+
+    if (key === "childStatement" || key === "parentStatement") {
+      setActiveRecordId(null);
+      setShowParentNotes(false);
+      if (view === "result") {
+        setView("home");
+      }
+    }
+  };
+
+  const toggleCommonCaregiver = (name: string) => {
+    setSettings((previous) => {
+      if (previous.commonCaregiverOptions.includes(name)) {
+        return previous;
+      }
+      const next = [...previous.commonCaregiverOptions, name].slice(-2);
+      return {
+        ...previous,
+        commonCaregiverOptions: normalizeCommonCaregivers(previous.caregiverOptions, next),
+      };
+    });
+  };
+
+  const cycleCaregiver = () => {
+    if (commonCaregivers.length === 0) {
+      return;
+    }
+    if (commonCaregivers.length === 1) {
+      updateDraft("caregiver", commonCaregivers[0] ?? DEFAULT_DRAFT.caregiver);
+      return;
+    }
+    const next = draft.caregiver === commonCaregivers[0] ? commonCaregivers[1] : commonCaregivers[0];
+    if (isDadModeActive && next === "爸爸") {
+      setToast({ message: "爸爸一直都在", tone: "pink" });
+      return;
+    }
+    updateDraft("caregiver", next);
+  };
+
+  const selectRepairPlan = (recordId: string, index: number) => {
+    setRecords((previous) => previous.map((item) => (item.id === recordId ? { ...item, selectedRepairIndex: index } : item)));
+  };
+
+  const completeRepairPlan = (recordId: string, index: number) => {
+    setRecords((previous) =>
+      previous.map((item) =>
+        item.id === recordId
+          ? {
+            ...item,
+            selectedRepairIndex: index,
+            completedRepairIndex: item.completedRepairIndex === index ? null : index,
+          }
+          : item,
+      ),
+    );
+  };
+
+  const openRecord = (record: RecordItem) => {
+    setActiveRecordId(record.id);
+    setShowParentNotes(false);
+    setView("result");
+  };
+
+  const handleSaveToast = (message: string) => {
+    setToast({ message, tone: "pink" });
+  };
+
+  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxSize = 200;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxSize) {
+            height *= maxSize / width;
+            width = maxSize;
+          }
+        } else {
+          if (height > maxSize) {
+            width *= maxSize / height;
+            height = maxSize;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+        updateSetting("petAvatar", dataUrl);
+        setToast({ message: "头像已保存", tone: "pink" });
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleGenerate = async () => {
+    if (!collapseText(draft.childStatement) || !collapseText(draft.parentStatement)) {
+      setToast({ message: "先把双方的话写上，再请大法官出庭哦。", tone: "amber" });
+      return;
+    }
+
+    const currentProfile = resolveChildProfile(settings);
+    const issueTag = inferIssueTag(draft.childStatement, draft.parentStatement);
+
+    setIsGenerating(true);
+    setLoadingLine(buildLoadingLine(settings, draft, isDadModeActive));
+
+    try {
+      let source: Source = "demo";
+      let result: MediationResult | undefined = undefined;
+
+      if (detectSafetyRisk(draft.childStatement, draft.parentStatement)) {
+        result = buildSafetyResult(settings, draft, currentProfile);
+        source = "safety";
+      } else {
+        let retries = 3;
+        let success = false;
+
+        while (retries > 0 && !success) {
+          try {
+            result = await requestGeminiResult(settings, draft, currentProfile, isDadModeActive);
+            source = result.safety.mode === "alert" ? "safety" : "gemini";
+            success = true;
+          } catch (err: any) {
+            retries -= 1;
+            console.error("=== API调用失败重试剩余", retries, " ===\n", err);
+            if (retries > 0) {
+              setToast({ message: `哎呀手滑了，重新整理中...（还可试${retries}次）`, tone: "amber" });
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+            } else {
+              setToast({ message: `网络好像开小差了，大法官先按经验断案啦。`, tone: "amber" });
+              result = buildDemoCopy(settings, draft, currentProfile);
+              source = "demo";
+            }
+          }
+        }
+      }
+
+      const finalResult = result!;
+
+      const record: RecordItem = {
+        id: createId(),
+        createdAt: new Date().toISOString(),
+        draft: { ...draft },
+        result: finalResult,
+        meta: { source, issueTag },
+        selectedRepairIndex: 0,
+        completedRepairIndex: null,
+      };
+
+      setRecords((previous) => [record, ...previous].slice(0, 120));
+      setActiveRecordId(record.id);
+      setShowParentNotes(false);
+      setView("result");
+
+      if (source === "gemini") {
+        setToast({ message: "新的判词已经出来了。", tone: "dark" });
+      }
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const speakText = (text: string, isDadMode: boolean = false) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window) || !collapseText(text)) return false;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "zh-CN";
+
+    if (isDadMode) {
+      utterance.rate = 1.0;
+      utterance.pitch = 0.9;
+    } else {
+      utterance.rate = 1.05;
+      utterance.pitch = 1.15;
+    }
+
+    const voices = window.speechSynthesis.getVoices();
+    if (voices && voices.length > 0) {
+      let preferredVoice;
+      if (isDadMode) {
+        preferredVoice = voices.find((voice) => /Yunxi|Yunjian|Liaoning|男|Male/i.test(`${voice.lang} ${voice.name}`)) ??
+          voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
+      } else {
+        preferredVoice = voices.find((voice) => /Xiaobei|zh-CN-liaoning/i.test(`${voice.lang} ${voice.name}`)) ??
+          voices.find((voice) => /zh|Chinese|中文/i.test(`${voice.lang} ${voice.name}`));
+      }
+
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+    }
+
+    window.speechSynthesis.speak(utterance);
+    return true;
+  };
+
+  const handleTestVoice = () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+        return;
+      }
+    }
+    const previewText = `${settings.petName}大法官来试一小句啦。今天我们把话慢慢说柔一点，好吗？`;
+    const didSpeak = speakText(previewText, false);
+    if (!didSpeak) setToast({ message: "当前设备暂时不支持语音试听。", tone: "amber" });
+  };
+
+  const handlePlayTts = () => {
+    if (!activeRecord) return;
+
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+        return;
+      }
+    }
+
+    /*
+     * 【自定义录音教程】
+     * 如果你想在爸爸模式下，播放你亲自录制的固定声音文件（比如 baba.mp3），
+     * 你可以把 baba.mp3 放在 public 根目录下，并把下面这几行代码取消注释。
+     * 由于大模型每次生成的都是动态文字，单纯的 MP3 只能播一段固定的开场白。
+     * 如果你想让大模型生成的文字全都是你的声音，需要接入服务（如 ElevenLabs / Azure Custom Voice）。
+     *
+     * if (activeRecord.result.is_dad_mode) {
+     *   const audio = new Audio('./baba.mp3');
+     *   audio.play().catch(e => console.error("播放自定义语音失败", e));
+     *   return;
+     * }
+     */
+
+    const didSpeak = speakText(activeRecord.result.tts_script, activeRecord.result.is_dad_mode);
+    if (!didSpeak) setToast({ message: "当前设备暂时不支持语音播放。", tone: "amber" });
+  };
+
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(244,114,182,0.16),_transparent_25%),radial-gradient(circle_at_bottom,_rgba(56,189,248,0.16),_transparent_25%),linear-gradient(180deg,_#fffafc_0%,_#f8fafc_52%,_#eef2ff_100%)] px-3 py-4 text-slate-900 sm:px-6 sm:py-8">
+      <div className="mx-auto flex min-h-[calc(100vh-2rem)] w-full max-w-[430px] flex-col overflow-hidden rounded-[34px] border border-white/70 bg-white/60 shadow-[0_30px_100px_rgba(15,23,42,0.16)] backdrop-blur-xl sm:min-h-[840px]">
+        <div className="relative border-b border-white/70 bg-white/70 px-4 pb-4 pt-5 backdrop-blur">
+          <div className="absolute -right-8 -top-8 h-28 w-28 rounded-full bg-pink-200/40 blur-3xl" />
+          <div className="absolute -left-8 bottom-0 h-24 w-24 rounded-full bg-sky-200/35 blur-3xl" />
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className={cn("float-soft flex h-14 w-14 items-center justify-center rounded-[22px] bg-gradient-to-br text-3xl text-white shadow-lg overflow-hidden", isDadModeActive ? "from-slate-700 to-slate-900" : pet.accent)}>
+                {isDadModeActive ? (
+                  <img
+                    src={settings.petAvatar || "https://api.dicebear.com/9.x/big-smile/svg?backgroundType=solid,gradientLinear&accessories=mustache,sailormoonCrown,sleepMask,sunglasses,glasses&backgroundColor=ffd5dc,d1d4f9&seed=Eden"}
+                    alt="爸爸"
+                    className="h-full w-full object-cover"
+                    onError={(e) => {
+                      // 没替换本地图且没上传头像时，退回展示“戴眼镜的理工男”插画
+                      e.currentTarget.src = "https://api.dicebear.com/9.x/big-smile/svg?backgroundType=solid,gradientLinear&accessories=mustache,sailormoonCrown,sleepMask,sunglasses,glasses&backgroundColor=ffd5dc,d1d4f9&seed=Edenh";
+                    }}
+                  />
+                ) : (settings.petAvatar ? (
+                  <img src={settings.petAvatar} alt="Pet Avatar" className="h-full w-full object-cover" />
+                ) : (
+                  pet.emoji
+                ))}
+              </div>
+              <div>
+                {isDadModeTriggered ? (
+                  <button
+                    onClick={() => setIsDadModeActive(!isDadModeActive)}
+                    className={cn("text-xl font-semibold tracking-tight px-3 py-1 rounded-2xl transition", isDadModeActive ? "bg-slate-900 text-white" : "bg-white text-slate-900 border border-slate-200 shadow-sm")}
+                  >
+                    {isDadModeActive ? "爸爸大法官" : `${settings.petName}大法官`}
+                  </button>
+                ) : (
+                  <h1 className="text-xl font-semibold tracking-tight">{settings.petName}大法官</h1>
+                )}
+                <p className="mt-1 text-sm text-slate-500">
+                  {view === "result" ? "这次我先把双方的话轻轻摆整齐了" : "今天也来帮你们把话说柔一点"}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {view !== "records" ? <IconButton icon="📚" label="成长记录" onClick={() => setView("records")} /> : null}
+              {view !== "settings" ? <IconButton icon="⚙️" label="设置" onClick={() => setView("settings")} /> : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          {view === "home" ? (
+            <div className="space-y-4">
+              <Card className={cn("bg-gradient-to-br", isDadModeActive ? "from-slate-100 to-slate-200" : pet.soft)}>
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-2">
+                      <div className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-xs font-semibold text-slate-600 shadow-sm">
+                        <span>✨</span>
+                        <span>开场语</span>
+                      </div>
+                      <p className="text-sm leading-7 text-slate-700">
+                        {isDadModeActive ? "爸爸一直都在。把想说的话告诉爸爸吧。" : openingLine}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setOpeningSeed((previous) => previous + 1)}
+                      className="shrink-0 rounded-2xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white shadow-sm"
+                    >
+                      换一句
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <TinyStat label="孩子" value={settings.childName} />
+                    <TinyStat label="已调解" value={totalMediations} />
+                    <TinyStat label="亲密度" value={`+${totalIntimacy}`} />
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-3">
+                  <label className="text-sm font-semibold text-slate-800">{settings.childName}怎么说</label>
+                  <textarea
+                    value={draft.childStatement}
+                    onChange={(event) => updateDraft("childStatement", event.target.value)}
+                    rows={4}
+                    className="min-h-[112px] w-full resize-none rounded-3xl bg-slate-50 px-4 py-3 text-sm leading-7 text-slate-700 outline-none placeholder:text-slate-300"
+                    placeholder={`${settings.childName}想说什么？`}
+                  />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-3">
+                  <label className="text-sm font-semibold text-slate-800">
+                    <button type="button" onClick={cycleCaregiver} className="rounded-full bg-sky-50 px-2.5 py-1 text-sm font-semibold text-sky-700">
+                      {draft.caregiver}
+                    </button>
+                    <span className="ml-2">怎么说</span>
+                  </label>
+                  <textarea
+                    value={draft.parentStatement}
+                    onChange={(event) => updateDraft("parentStatement", event.target.value)}
+                    rows={4}
+                    className="min-h-[112px] w-full resize-none rounded-3xl bg-slate-50 px-4 py-3 text-sm leading-7 text-slate-700 outline-none placeholder:text-slate-300"
+                    placeholder={`${draft.caregiver}想表达什么？`}
+                  />
+                </div>
+              </Card>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={isGenerating}
+                  className={cn(
+                    "rounded-[24px] bg-slate-900 px-4 py-4 text-sm font-semibold text-white shadow-[0_16px_30px_rgba(15,23,42,0.18)] transition",
+                    isGenerating && "cursor-wait opacity-80",
+                  )}
+                >
+                  {isGenerating ? `${isDadModeActive ? "爸爸" : settings.petName}正在整理…` : "请大法官出庭"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView("records")}
+                  className="rounded-[24px] bg-white px-4 py-4 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                >
+                  查看成长记录
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {view === "result" ? (
+            activeRecord ? (
+              activeRecord.result.is_dad_mode ? (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setView("home")}
+                      className="rounded-[24px] bg-slate-900 px-6 py-3 text-base font-semibold text-white shadow-md transition hover:bg-slate-800"
+                    >
+                      返回
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePlayTts}
+                      className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                    >
+                      🔊 爸爸语音
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setView("records")}
+                      className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                    >
+                      查看记录
+                    </button>
+                  </div>
+
+                  <Card className="bg-gradient-to-br from-slate-100 to-slate-200">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <div className="text-sm font-semibold text-slate-900">这次的心情线索</div>
+                        <div className="flex flex-wrap gap-2">
+                          <span className="rounded-full bg-slate-900 text-white px-3 py-1 text-xs font-semibold">
+                            女儿：{activeRecord.result.dad_data?.emotion_summary?.daughter}
+                          </span>
+                          <span className="rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm">
+                            妈妈：{activeRecord.result.dad_data?.emotion_summary?.mother}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {activeRecord.result.safety.mode === "alert" ? (
+                    <Card className="border-rose-100 bg-rose-50/90">
+                      <div className="space-y-3 text-sm leading-7 text-rose-900">
+                        <div className="text-base font-semibold">先处理安全</div>
+                        <p>{activeRecord.result.safety.alert}</p>
+                      </div>
+                    </Card>
+                  ) : null}
+
+                  <Card>
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-semibold text-slate-900">爸爸对女儿说</h3>
+                      <div className="rounded-[24px] bg-slate-50 px-4 py-3 text-sm leading-7 text-slate-700">
+                        {activeRecord.result.dad_data?.dad_to_daughter}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card>
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-semibold text-slate-900">爸爸对妈妈说</h3>
+                      <div className="rounded-[24px] bg-pink-50 px-4 py-3 text-sm leading-7 text-pink-800">
+                        {activeRecord.result.dad_data?.dad_to_mom}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="border-blue-100 bg-blue-50/80">
+                    <div className="space-y-4">
+                      <h3 className="text-sm font-semibold text-blue-900">沟通桥梁</h3>
+
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-blue-700">爸爸可以说</div>
+                        {activeRecord.result.dad_data?.bridge_script?.dad_says_now?.map((line: string, i: number) => (
+                          <div key={i} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">{line}</div>
+                        ))}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-blue-700">女儿可以试着说</div>
+                        {activeRecord.result.dad_data?.bridge_script?.daughter_can_say?.map((line: string, i: number) => (
+                          <div key={i} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">{line}</div>
+                        ))}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="text-xs font-semibold text-blue-700">妈妈可以试着说</div>
+                        {activeRecord.result.dad_data?.bridge_script?.mom_can_say?.map((line: string, i: number) => (
+                          <div key={i} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm">{line}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="border-emerald-100 bg-emerald-50/80">
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-semibold text-emerald-900">二选一和解方案</h3>
+                      <div className="space-y-3">
+                        {[activeRecord.result.dad_data?.solution_plan?.option_A, activeRecord.result.dad_data?.solution_plan?.option_B].map((plan: any, index) => {
+                          if (!plan) return null;
+                          const isSelected = activeRecord.selectedRepairIndex === index;
+                          const isDone = activeRecord.completedRepairIndex === index;
+
+                          return (
+                            <div
+                              key={`${plan.name}-${index}`}
+                              className={cn(
+                                "rounded-[22px] border p-3 transition",
+                                isSelected ? "border-emerald-400 bg-emerald-50 shadow-sm" : "border-white bg-white",
+                                isDone && "border-emerald-500 ring-2 ring-emerald-200",
+                              )}
+                            >
+                              <button type="button" onClick={() => selectRepairPlan(activeRecord.id, index)} className="w-full text-left">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="text-sm font-semibold text-slate-900">{plan.name}</div>
+                                    <ul className="mt-2 pl-4 list-disc text-sm leading-6 text-slate-700">
+                                      {plan.steps?.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                                    </ul>
+                                  </div>
+                                  <span className={cn("rounded-full px-2.5 py-1 text-[11px] font-semibold shrink-0 mt-1", isSelected ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500")}>
+                                    {isSelected ? "当前选择" : "点我切换"}
+                                  </span>
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => completeRepairPlan(activeRecord.id, index)}
+                                className={cn(
+                                  "mt-3 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold transition",
+                                  isDone ? "bg-emerald-600 text-white" : "bg-slate-100 text-emerald-700",
+                                )}
+                              >
+                                {isDone ? "✓ 已完成这个方案" : "完成后点这里打勾"}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card>
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-semibold text-slate-900">微小协议 & 和解动作</h3>
+                      <DetailItem title="今天的小约定" value={activeRecord.result.dad_data?.micro_agreement?.today_rule || ""} />
+                      <DetailItem title="下次吵架暗号" value={activeRecord.result.dad_data?.micro_agreement?.next_time_signal || ""} />
+                      <DetailItem title="没做到怎么补救" value={activeRecord.result.dad_data?.micro_agreement?.repair_if_broken || ""} />
+                      <div className="rounded-2xl bg-amber-50 px-4 py-3 shadow-sm border border-amber-100">
+                        <div className="mb-1 text-xs font-semibold text-amber-700">立刻和解动作 (1分钟)</div>
+                        <div className="text-sm leading-6 text-slate-700">{activeRecord.result.dad_data?.repair_action?.do_now}</div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="bg-slate-900 text-white">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-300">温馨结尾</div>
+                        <div className="mt-1 text-sm leading-6 text-white">{activeRecord.result.dad_data?.closing?.message}</div>
+                      </div>
+                    </div>
+                    <div className="mt-4 border-t border-slate-700 pt-3">
+                      <div className="text-xs text-slate-400">奖励</div>
+                      <div className="text-sm font-bold text-amber-300 mt-1">{activeRecord.result.dad_data?.closing?.intimacy_reward}</div>
+                    </div>
+                  </Card>
+
+                  <Card>
+                    <button
+                      type="button"
+                      onClick={() => setShowParentNotes((previous) => !previous)}
+                      className="flex w-full items-center justify-between gap-3 text-left"
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">案件分析 (爸爸视角)</div>
+                        <div className="mt-1 text-xs text-slate-500">点开看看真正的矛盾在哪里</div>
+                      </div>
+                      <span className="text-lg text-slate-400">{showParentNotes ? "▾" : "▸"}</span>
+                    </button>
+
+                    {showParentNotes ? (
+                      <div className="mt-4 space-y-3 text-sm leading-7 text-slate-700">
+                        <DetailItem title="核心矛盾" value={activeRecord.result.dad_data?.case_analysis?.core_conflict || ""} />
+                        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                          <div className="mb-1 text-xs font-semibold text-slate-500">女儿真正想要的</div>
+                          <ul className="list-disc pl-4 text-sm space-y-1">
+                            {activeRecord.result.dad_data?.case_analysis?.daughter_needs?.map((n: string, i: number) => <li key={i}>{n}</li>)}
+                          </ul>
+                        </div>
+                        <div className="rounded-2xl bg-slate-50 px-4 py-3">
+                          <div className="mb-1 text-xs font-semibold text-slate-500">妈妈真正担心的</div>
+                          <ul className="list-disc pl-4 text-sm space-y-1">
+                            {activeRecord.result.dad_data?.case_analysis?.mother_needs?.map((n: string, i: number) => <li key={i}>{n}</li>)}
+                          </ul>
+                        </div>
+                      </div>
+                    ) : null}
+                  </Card>
+
+                  <div className="pt-2 pb-6">
+                    <button
+                      type="button"
+                      onClick={() => setView("home")}
+                      className="w-full rounded-[24px] bg-slate-900 px-6 py-4 text-base font-semibold text-white shadow-md transition hover:bg-slate-800"
+                    >
+                      返回
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setView("home")}
+                      className="rounded-[24px] bg-slate-900 px-6 py-3 text-base font-semibold text-white shadow-md transition hover:bg-slate-800"
+                    >
+                      返回
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setView("records")}
+                      className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                    >
+                      查看记录
+                    </button>
+                  </div>
+
+                  <Card className={cn("bg-gradient-to-br", PETS[activeRecord.result.pet.type].soft)}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <div className="text-sm font-semibold text-slate-900">这次的心情线索</div>
+                        <div className="flex flex-wrap gap-2">
+                          <span className={cn("rounded-full px-3 py-1 text-xs font-semibold", PETS[activeRecord.result.pet.type].chip)}>
+                            孩子：{activeRecord.result.emotion_summary.child}
+                          </span>
+                          <span className="rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700">
+                            家长：{activeRecord.result.emotion_summary.parent}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="stamp-pop rounded-2xl border border-white/70 bg-white/85 px-3 py-2 text-center shadow-sm">
+                        <div className="text-[11px] font-medium text-slate-400">亲密度</div>
+                        <div className="text-2xl font-bold text-slate-900">+{activeRecord.result.reward.intimacy_points}</div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {activeRecord.result.safety.mode === "alert" ? (
+                    <Card className="border-rose-100 bg-rose-50/90">
+                      <div className="space-y-3 text-sm leading-7 text-rose-900">
+                        <div className="text-base font-semibold">先处理安全</div>
+                        <p>{activeRecord.result.child_view?.opening}</p>
+                        <p>{activeRecord.result.child_view?.observation}</p>
+                        <p>{activeRecord.result.safety.alert}</p>
+                      </div>
+                    </Card>
+                  ) : null}
+
+                  <Card>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-sm font-semibold text-slate-900">{activeRecord.result.pet.name}大法官说</h3>
+                        <button
+                          type="button"
+                          onClick={handlePlayTts}
+                          className="rounded-2xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white"
+                        >
+                          播放语音
+                        </button>
+                      </div>
+                      {[
+                        activeRecord.result.child_view?.opening,
+                        activeRecord.result.child_view?.observation,
+                        activeRecord.result.child_view?.judgment_short,
+                        activeRecord.result.child_view?.action_short,
+                        activeRecord.result.child_view?.closing
+                      ].map(
+                        (line, index) => (
+                          <div
+                            key={`${line}-${index}`}
+                            className={cn(
+                              "rounded-[24px] bg-slate-50 px-4 py-3 text-sm leading-7 text-slate-700 transition",
+                              visibleBubbles > index ? "fade-up-in" : "opacity-0",
+                              index === 2 && "bg-pink-50 text-pink-800",
+                            )}
+                          >
+                            {line}
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+
+                  <Card className="border-emerald-100 bg-emerald-50/80">
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-semibold text-emerald-900">{activeRecord.result.action_card?.title}</h3>
+                      <TaskRow label="孩子可以说" value={activeRecord.result.action_card?.child_can_say || ""} />
+                      <TaskRow label={`${activeRecord.draft.caregiver}可以说`} value={activeRecord.result.action_card?.parent_can_say || ""} />
+                      <div className="rounded-[24px] bg-white/80 p-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-emerald-900">二选一和解计划</div>
+                            <div className="mt-1 text-xs text-emerald-700">选一个更顺手的方案，完成后打勾就好。</div>
+                          </div>
+                          <div className="rounded-full bg-emerald-100 px-3 py-1 text-[11px] font-semibold text-emerald-700">可切换</div>
+                        </div>
+                        <div className="space-y-3">
+                          {activeRepairPlans.map((plan, index) => {
+                            const isSelected = activeRecord.selectedRepairIndex === index;
+                            const isDone = activeRecord.completedRepairIndex === index;
+
+                            return (
+                              <div
+                                key={`${plan.title}-${index}`}
+                                className={cn(
+                                  "rounded-[22px] border p-3 transition",
+                                  isSelected ? "border-emerald-400 bg-emerald-50" : "border-white bg-white",
+                                  isDone && "border-emerald-500 ring-2 ring-emerald-200",
+                                )}
+                              >
+                                <button type="button" onClick={() => selectRepairPlan(activeRecord.id, index)} className="w-full text-left">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <div className="text-sm font-semibold text-slate-900">{plan.title}</div>
+                                      <div className="mt-1 text-sm leading-6 text-slate-700">{plan.description}</div>
+                                    </div>
+                                    <span className={cn("rounded-full px-2.5 py-1 text-[11px] font-semibold", isSelected ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500")}>
+                                      {isSelected ? "当前选择" : "点我切换"}
+                                    </span>
+                                  </div>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => completeRepairPlan(activeRecord.id, index)}
+                                  className={cn(
+                                    "mt-3 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold transition",
+                                    isDone ? "bg-emerald-600 text-white" : "bg-slate-100 text-emerald-700",
+                                  )}
+                                >
+                                  {isDone ? "✓ 已完成这个和解计划" : "完成后点这里打勾"}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="bg-slate-900 text-white">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-semibold">{activeRecord.result.reward.badge_text}</div>
+                        <div className="mt-1 text-xs text-slate-300">愿意表达、愿意听、愿意和解，就值得被鼓励。</div>
+                      </div>
+                      <div className="stamp-pop rounded-2xl border border-white/15 px-4 py-2 text-center">
+                        <div className="text-[11px] tracking-[0.2em] text-slate-400">奖励</div>
+                        <div className="text-2xl font-bold">+{activeRecord.result.reward.intimacy_points}</div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card>
+                    <button
+                      type="button"
+                      onClick={() => setShowParentNotes((previous) => !previous)}
+                      className="flex w-full items-center justify-between gap-3 text-left"
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">给家长的小参考</div>
+                        <div className="mt-1 text-xs text-slate-500">点开看看这次为什么会吵起来</div>
+                      </div>
+                      <span className="text-lg text-slate-400">{showParentNotes ? "▾" : "▸"}</span>
+                    </button>
+
+                    {showParentNotes ? (
+                      <div className="mt-4 space-y-3 text-sm leading-7 text-slate-700">
+                        <DetailItem title="事情摘要" value={activeRecord.result.parent_view?.issue_summary || ""} />
+                        <DetailItem title="公平判断" value={activeRecord.result.parent_view?.fair_judgment || ""} />
+                        <DetailItem title="孩子成长点" value={activeRecord.result.parent_view?.child_learning || ""} />
+                        <DetailItem title="家长提醒" value={activeRecord.result.parent_view?.parent_guidance || ""} />
+                      </div>
+                    ) : null}
+                  </Card>
+
+                  <div className="pt-2 pb-6">
+                    <button
+                      type="button"
+                      onClick={() => setView("home")}
+                      className="w-full rounded-[24px] bg-slate-900 px-6 py-4 text-base font-semibold text-white shadow-md transition hover:bg-slate-800"
+                    >
+                      返回
+                    </button>
+                  </div>
+                </div>
+              )
+            ) : (
+              <Card>
+                <div className="space-y-3 py-6 text-center">
+                  <div className="text-4xl">📭</div>
+                  <div className="text-lg font-semibold">还没有判词</div>
+                  <p className="text-sm text-slate-500">先回去写下双方的话，再请大法官出庭。</p>
+                </div>
+              </Card>
+            )
+          ) : null}
+
+          {view === "records" ? (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setView("home")}
+                  className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                >
+                  返回首页
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView("settings")}
+                  className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                >
+                  打开设置
+                </button>
+              </div>
+
+              <Card>
+                <div className="grid grid-cols-3 gap-3">
+                  <TinyStat label="总次数" value={totalMediations} />
+                  <TinyStat label="亲密度" value={`+${totalIntimacy}`} />
+                  <TinyStat label="最近主题" value={latestIssue} />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-900">查看成长记录</div>
+                  {records.length === 0 ? (
+                    <div className="rounded-3xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+                      还没有记录，先完成一次调解吧。
+                    </div>
+                  ) : (
+                    records.map((record) => (
+                      <button
+                        key={record.id}
+                        type="button"
+                        onClick={() => openRecord(record)}
+                        className="w-full rounded-3xl border border-slate-200 bg-white px-4 py-4 text-left transition hover:border-slate-300"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-semibold text-slate-900">{formatDateTime(record.createdAt)}</span>
+                              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">{record.meta.issueTag}</span>
+                              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">+{record.result.reward.intimacy_points}</span>
+                            </div>
+                            <p className="text-sm leading-6 text-slate-600">
+                              {settings.childName}：{shortenText(record.draft.childStatement, 18) || "已记录"} / {record.draft.caregiver}：
+                              {shortenText(record.draft.parentStatement, 18) || "已记录"}
+                            </p>
+                          </div>
+                          <div className="text-xl text-slate-300">›</div>
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </Card>
+            </div>
+          ) : null}
+
+          {view === "settings" ? (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setView("home")}
+                  className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200"
+                >
+                  返回首页
+                </button>
+                <span className="text-sm font-semibold text-slate-500">修改后自动保存</span>
+              </div>
+
+              <Card>
+                <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">宠物设置</div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {(["cat", "dog", "rabbit"] as PetType[]).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() => updateSetting("petType", type)}
+                        className={cn(
+                          "rounded-3xl border px-3 py-4 text-center transition",
+                          settings.petType === type ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700",
+                        )}
+                      >
+                        <div className="text-3xl">{PETS[type].emoji}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">宠物名字</label>
+                    <input
+                      value={settings.petName}
+                      onChange={(event) => updateSetting("petName", event.target.value)}
+                      onBlur={() => handleSaveToast("宠物名字已自动保存。")}
+                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                      placeholder="例如：雪雪"
+                    />
+                  </div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      {settings.petAvatar && (
+                        <img src={settings.petAvatar} alt="Pet Avatar" className="h-12 w-12 rounded-xl object-cover shadow-sm bg-white" />
+                      )}
+                      <label className="cursor-pointer rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50">
+                        上传法官头像
+                        <input type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
+                      </label>
+                      {settings.petAvatar && (
+                        <button type="button" onClick={() => updateSetting("petAvatar", "")} className="rounded-2xl px-3 py-2 text-xs font-semibold text-rose-500 hover:bg-rose-50 transition">
+                          清除
+                        </button>
+                      )}
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500"></p>
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">孩子信息设置</div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <label className="text-sm font-semibold text-slate-800">孩子昵称</label>
+                    <input
+                      value={settings.childName}
+                      onChange={(event) => updateSetting("childName", event.target.value)}
+                      onBlur={() => handleSaveToast("孩子昵称已自动保存。")}
+                      className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                      placeholder="例如：乐乐"
+                    />
+                  </div>
+                  <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                    <div className="text-sm font-semibold text-slate-800">孩子性别</div>
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      {[
+                        { value: "boy", label: "男孩" },
+                        { value: "girl", label: "女孩" },
+                        { value: "unspecified", label: "不设置" },
+                      ].map((item) => (
+                        <button
+                          key={item.value}
+                          type="button"
+                          onClick={() => {
+                            updateSetting("childGender", item.value as ChildGender);
+                            handleSaveToast("孩子性别已自动保存。");
+                          }}
+                          className={cn(
+                            "rounded-2xl px-3 py-3 text-sm font-semibold transition",
+                            settings.childGender === item.value ? "bg-slate-900 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200",
+                          )}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                      <label className="text-sm font-semibold text-slate-800">生日(20160125)</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={settings.childBirthday}
+                        onChange={(event) => updateSetting("childBirthday", event.target.value)}
+                        onBlur={(event) => {
+                          const normalized = normalizeBirthdayInput(event.target.value);
+                          const birthdayAge = calculateAgeFromBirthday(normalized);
+
+                          setSettings((previous) => ({
+                            ...previous,
+                            childBirthday: normalized,
+                            fallbackAge: birthdayAge !== null && !previous.ageManualOverride ? clampAge(birthdayAge) : previous.fallbackAge,
+                          }));
+
+                          if (birthdayAge !== null && !settings.ageManualOverride) {
+                            setAgeInput(String(clampAge(birthdayAge)));
+                          } else if (!normalized && !settings.ageManualOverride) {
+                            setAgeInput(String(DEFAULT_SETTINGS.fallbackAge));
+                          }
+
+                          handleSaveToast("生日已自动保存。");
+                        }}
+                        className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                        placeholder="可填 2016 或 20160125"
+                      />
+                    </div>
+                    <div className="rounded-3xl bg-slate-50 px-4 py-3">
+                      <label className="text-sm font-semibold text-slate-800">年龄</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={ageInput}
+                        onChange={(event) => setAgeInput(event.target.value.replace(/[^\d]/g, "").slice(0, 2))}
+                        onBlur={() => {
+                          const digits = ageInput.replace(/[^\d]/g, "");
+                          if (!digits) {
+                            const birthdayAge = calculateAgeFromBirthday(settings.childBirthday);
+                            const nextAge = clampAge(birthdayAge ?? DEFAULT_SETTINGS.fallbackAge);
+                            setSettings((previous) => ({
+                              ...previous,
+                              fallbackAge: nextAge,
+                              ageManualOverride: false,
+                            }));
+                            setAgeInput(String(nextAge));
+                            handleSaveToast("年龄已自动保存。");
+                            return;
+                          }
+                          const parsedAge = clampAge(Number(digits));
+                          setSettings((previous) => ({
+                            ...previous,
+                            fallbackAge: parsedAge,
+                            ageManualOverride: true,
+                          }));
+                          setAgeInput(String(parsedAge));
+                          handleSaveToast("年龄已自动保存。");
+                        }}
+                        className="mt-2 w-full border-0 bg-transparent text-sm text-slate-700 outline-none"
+                        placeholder="例如：10"
+                      />
+                    </div>
+                  </div>
+                  <div className="rounded-3xl bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-900">
+                    两个都不填时默认10岁；填了生日会自动回填年龄。
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">家长称呼（两个常用切换）</div>
+                  <div className="rounded-3xl bg-white px-4 py-4 ring-1 ring-slate-100">
+                    <div className="text-sm font-semibold text-slate-800">前台点“妈妈怎么说”时切换。</div>
+                    <p className="mt-1 text-xs leading-6 text-slate-500"> {draft.caregiver} </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {settings.caregiverOptions.map((name) => {
+                        const selected = commonCaregivers.includes(name);
+                        return (
+                          <button
+                            key={name}
+                            type="button"
+                            onClick={() => {
+                              toggleCommonCaregiver(name);
+                              handleSaveToast("常用称呼已自动保存。");
+                            }}
+                            className={cn(
+                              "rounded-full px-3 py-2 text-sm font-semibold transition",
+                              selected ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700",
+                            )}
+                          >
+                            {selected ? `✓ ${name}` : name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-900">语音播报体验测试</div>
+                    <button
+                      type="button"
+                      onClick={handleTestVoice}
+                      className="rounded-2xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition hover:bg-slate-800"
+                    >
+                      点此播放测试语音
+                    </button>
+                  </div>
+                  <p className="text-xs leading-6 text-slate-500">
+                    已默认指定为系统中的标准音色(如不支持则降级为默认中文)。设备环境不同音色可能有差异。
+                  </p>
+                </div>
+              </Card>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {isGenerating ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-[32px] border border-white/60 bg-white/92 p-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="mx-auto mb-4 flex items-center justify-center gap-4">
+              <div className={cn("flex h-16 w-16 items-center justify-center rounded-[24px] bg-gradient-to-br text-3xl text-white shadow-lg overflow-hidden", isDadModeActive ? "from-slate-700 to-slate-900" : pet.accent)}>
+                {isDadModeActive ? (
+                  <img
+                    src={settings.petAvatar || "https://api.dicebear.com/7.x/avataaars/svg?seed=baba&backgroundColor=transparent&top=shortHair&accessories=prescription02&facialHair=blank&clothing=blazerAndShirt"}
+                    alt="爸爸"
+                    className="h-full w-full object-cover"
+                    onError={(e) => {
+                      e.currentTarget.src = "https://api.dicebear.com/7.x/avataaars/svg?seed=baba&backgroundColor=transparent&top=shortHair&accessories=prescription02&facialHair=blank&clothing=blazerAndShirt";
+                    }}
+                  />
+                ) : (settings.petAvatar ? (
+                  <img src={settings.petAvatar} alt="Pet Avatar" className="h-full w-full object-cover" />
+                ) : (
+                  pet.emoji
+                ))}
+              </div>
+              <div className="text-4xl text-slate-600 spin-soft">
+                {isDadModeActive ? "💡" : pet.writingToolEmoji}
+              </div>
+            </div>
+            <div className="space-y-3">
+              <h2 className="text-lg font-semibold text-slate-900">{isDadModeActive ? "爸爸正在整理心绪" : `${settings.petName}大法官正在整理判词`}</h2>
+              <div className="rounded-[24px] bg-slate-50 px-4 py-4 text-left">
+                <div className="mb-2 text-xs font-semibold tracking-[0.18em] text-slate-400">{isDadModeActive ? "爸爸正在写下给你们的建议" : `${settings.petName}用${pet.writingToolLabel}在慢慢写字`}</div>
+                <p className="scratch-write min-h-[84px] text-sm leading-7 text-slate-700">
+                  {typedLoadingLine}
+                  <span className="paw-cursor">{isDadModeActive ? "✍️" : pet.writingToolEmoji}</span>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {toast ? (
+        <div className="fixed inset-x-0 bottom-6 z-50 mx-auto w-fit max-w-[calc(100vw-2rem)] px-4">
+          <div
+            className={cn(
+              "rounded-full px-4 py-3 text-sm font-semibold shadow-lg backdrop-blur",
+              toast.tone === "dark" && "bg-slate-900 text-white",
+              toast.tone === "pink" && "bg-pink-500 text-white",
+              toast.tone === "amber" && "bg-amber-400 text-slate-900",
+            )}
+          >
+            {toast.message}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl bg-white/80 px-4 py-3 text-sm leading-7 text-slate-700">
+      <div className="mb-1 text-xs font-semibold text-slate-500">{label}</div>
+      <div>{value}</div>
+    </div>
+  );
+}
+
+function DetailItem({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="rounded-2xl bg-slate-50 px-4 py-3">
+      <div className="mb-1 text-xs font-semibold text-slate-500">{title}</div>
+      <div>{value}</div>
+    </div>
+  );
+}
