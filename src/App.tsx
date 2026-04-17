@@ -447,7 +447,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   commonCaregiverOptions: ["妈妈", "爸爸"],
   systemPrompt: DEFAULT_PROMPT,
   apiKey: "",
-  apiEndpoint: "https://dwpu.vercel.app",
+  apiEndpoint: "https://wpu.dpdns.org",
   modelName: "gemini-3.1-flash-lite-preview",
 };
 
