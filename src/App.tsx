@@ -1264,11 +1264,14 @@ async function requestGeminiResult(settings: SettingsState, draft: DraftState, p
     headers["Authorization"] = `Bearer ${settings.apiKey.trim()}`;
   }
 
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(reqBody),
-  });
+const response = await fetch(url.toString(), {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-goog-api-key": settings.apiKey?.trim() || "",
+  },
+  body: JSON.stringify(reqBody),
+});
 
   if (!response.ok) {
     let errText = "";
